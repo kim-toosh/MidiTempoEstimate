@@ -1,0 +1,5 @@
+numpy
+pytest
+python-rtmidi
+matplotlib
+PyQt6
