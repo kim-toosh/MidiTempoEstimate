@@ -149,11 +149,13 @@ class MidiInputHandler:
         if status != self._NOTE_ON or velocity == 0:
             return
 
+        note    = midi_bytes[1]
+        channel = midi_bytes[0] & 0x0F   # lower 4 bits = channel (0-indexed)
+
         timestamp_sec = time.perf_counter()
-        result = self._pf.update(timestamp_sec)
+        result = self._pf.update(timestamp_sec, note_number=note, velocity=velocity, channel=channel)
 
         if result is None:
-            print("[midi] first event — reference time set", flush=True)
             return
 
         if self._on_result is not None:

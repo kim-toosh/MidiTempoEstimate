@@ -1,0 +1,15 @@
+# Pythonのキャッシュや環境ファイルを無視
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.egg-info/
+dist/
+build/
+
+# バージョン管理やエディタの非表示ファイル
+.git/
+.gitignore
+.vscode/
+.idea/

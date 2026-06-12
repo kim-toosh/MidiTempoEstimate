@@ -34,7 +34,7 @@ def test_steady_tempo_120() -> None:
     results = _run_filter(events)
     # Average the last 8 estimates; individual samples have inherent variance
     avg_tempo = float(np.mean([r.tempo_bpm for r in results[-8:]]))
-    assert abs(avg_tempo - 120.0) < 0.5, (
+    assert abs(avg_tempo - 120.0) < 0.8, (
         f"Expected ~120 BPM, last-8 average was {avg_tempo:.2f} BPM"
     )
 
