@@ -84,6 +84,12 @@ class ParticleFilter:
         self._prev_tempo: Optional[float] = None
         self._kalman_reject_streak: int = 0
 
+        # 同時イベントのグルーピング: span_same_time以内の異なるノートのイベントを
+        # 1つのグループとみなし、確定時にタイムスタンプの平均値を使う。
+        self.span_same_time: float = getattr(config, 'SPAN_SAME_TIME_SEC', 0.05)
+        self._pending_group: list[tuple[float, int, int, int]] = []
+        self._pending_group_start: Optional[float] = None
+
         use_autocorr = getattr(config, 'USE_DRUM_WEIGHTS', True)
         self._autocorr: Optional[AutocorrEstimator] = (
             AutocorrEstimator(config, weight_map=weight_map) if use_autocorr else None
@@ -114,6 +120,18 @@ class ParticleFilter:
 
         velocity == 0 (NOTE_OFF) is silently skipped and returns *None*.
 
+        Same-timing event grouping
+        ---------------------------
+        Events that arrive within ``span_same_time`` seconds of the current
+        pending group's first event, and whose note number is not already in
+        that group, are buffered rather than processed immediately. When the
+        group is finalised (either because a later event falls outside the
+        window / repeats a note already in the group, or via :meth:`flush`),
+        every buffered event is processed using the AVERAGE timestamp of the
+        group. This call returns the result of finalising the *previous*
+        group, if any; the just-received event is always buffered into the
+        (possibly new) pending group and its own result is deferred.
+
         Args:
             timestamp_sec: Absolute timestamp in seconds.
             note_number:   MIDI note number (0–127).  Defaults to 60 (middle C),
@@ -122,7 +140,77 @@ class ParticleFilter:
             channel:       MIDI channel (0-indexed).  Channel 9 is the GM drum channel.
 
         Returns:
-            :class:`EstimatorResult`, or *None* when the event is skipped.
+            :class:`EstimatorResult`, or *None* when no group was finalised.
+        """
+        if velocity == 0:
+            return None   # NOTE_OFF
+
+        # 生のタイムスタンプでautocorrバッファに即時フィード（グルーピングと無関係）
+        if self._autocorr is not None:
+            self._autocorr.add_event(timestamp_sec, note_number, velocity)
+
+        # ── 同時イベントのグルーピング ────────────────────────────────────────
+        finalized_result: Optional[EstimatorResult] = None
+        if self._pending_group:
+            elapsed = timestamp_sec - self._pending_group_start
+            pending_notes = {n for (_, n, _, _) in self._pending_group}
+            if elapsed > self.span_same_time or note_number in pending_notes:
+                finalized_result = self._finalize_pending_group()
+
+        if not self._pending_group:
+            self._pending_group_start = timestamp_sec
+        self._pending_group.append((timestamp_sec, note_number, velocity, channel))
+
+        return finalized_result
+
+    def flush(self, now_sec: float) -> Optional[EstimatorResult]:
+        """Finalise the pending group if it has aged past ``span_same_time``.
+
+        This handles isolated events that never receive a follow-up event
+        within ``span_same_time`` — without a periodic call to this method
+        such a group would never be finalised.
+
+        Args:
+            now_sec: Current time in the same clock domain as the timestamps
+                     passed to :meth:`update`.
+
+        Returns:
+            :class:`EstimatorResult`, or *None* if there is nothing to flush
+            or the pending group has not yet aged past ``span_same_time``.
+        """
+        if (self._pending_group
+                and (now_sec - self._pending_group_start) > self.span_same_time):
+            return self._finalize_pending_group()
+        return None
+
+    def _finalize_pending_group(self) -> Optional[EstimatorResult]:
+        """保留グループを確定し、平均タイムスタンプで各イベントを処理する。"""
+        events = self._pending_group
+        self._pending_group = []
+        self._pending_group_start = None
+
+        avg_ts = float(np.mean([ts for ts, _, _, _ in events]))
+
+        last_result: Optional[EstimatorResult] = None
+        for _, note_number, velocity, channel in events:
+            result = self._process_single_event(avg_ts, note_number, velocity, channel)
+            if result is not None:
+                last_result = result
+        return last_result
+
+    def _process_single_event(
+        self,
+        timestamp_sec: float,
+        note_number:   int,
+        velocity:      int,
+        channel:       int,
+    ) -> Optional[EstimatorResult]:
+        """単一イベント（確定済みグループの平均タイムスタンプを含む）を処理する。
+
+        Runs the full predict–weight–resample–estimate cycle for one event,
+        plus GCD reinit, convergence tracking, Kalman gating, and autocorr
+        seeding. Returns *None* when the event's same-category IOI is
+        missing, non-positive, or below the minimum threshold.
         """
         t0 = time.perf_counter()
 
@@ -130,14 +218,12 @@ class ParticleFilter:
         event, ioi_sec, gcd_tempo, gcd_conf = self.midi_gate.process(
             timestamp_sec, note_number, velocity, channel
         )
+        if gcd_tempo is not None:
+            gcd_tempo = self._correct_gcd_octave(gcd_tempo)
         if event is None:
-            return None   # velocity == 0 (NOTE_OFF)
+            return None   # velocity == 0 (NOTE_OFF) — should not occur here
 
-        # ── 2. Feed autocorr buffer (all valid events) ────────────────────────
-        if self._autocorr is not None:
-            self._autocorr.add_event(timestamp_sec, note_number, velocity)
-
-        # ── 3. Same-category IOI ──────────────────────────────────────────────
+        # ── 2. Same-category IOI ──────────────────────────────────────────────
         logger.debug("ioi(%s) -> %s", event.category.name, ioi_sec)
         if ioi_sec is None:
             logger.debug(
@@ -157,7 +243,7 @@ class ParticleFilter:
             )
             return None
 
-        # ── 4. Particle filter cycle ──────────────────────────────────────────
+        # ── 3. Particle filter cycle ──────────────────────────────────────────
         self._predict(ioi_sec)
         self._update_weights(ioi_sec, event)
         pre_resample_ess = self._resample_if_needed()
@@ -165,33 +251,24 @@ class ParticleFilter:
         processing_time_ms = (time.perf_counter() - t0) * 1000.0
         result = self._estimate(processing_time_ms, pre_resample_ess)
 
-        # ── 5. GCDによる粒子再初期化（初回のみ）───────────────────────────────
-        # 収束判定（5b）より先に行う。GCDが最初に信頼度を満たすイベントが
-        # HIHATになることがあり、5bのHIHAT例外（gcd_reliable）が先に収束扱いに
+        # ── 4. GCDによる粒子再初期化（初回のみ）───────────────────────────────
+        # 収束判定（4b）より先に行う。GCDが最初に信頼度を満たすイベントが
+        # HIHATになることがあり、4bのHIHAT例外（gcd_reliable）が先に収束扱いに
         # してしまうと、この再初期化が永久にブロックされてしまうため。
         gcd_reliable = gcd_conf >= getattr(self.config, 'GCD_CONFIDENCE_THRESHOLD', 0.70)
         if (not self._converged
                 and not self._gcd_seeded
                 and gcd_tempo is not None
                 and gcd_reliable):
-            # gcd_tempoは観測IOIに共通する最小リズム単位（16th/8th/quarter/half/whole
-            # note等）から算出したテンポであり、1拍のテンポそのものとは限らない。
-            # gcd周期 * GCD_OCTAVE_RATIOS の候補周期をBPMに変換した
-            # gcd_tempo / GCD_OCTAVE_RATIOS の中から、KalmanGateの現在のテンポ推定に
-            # 最も近いものを再初期化の基準テンポとして採用する。
-            octave_ratios    = np.asarray(self.config.GCD_OCTAVE_RATIOS, dtype=np.float64)
-            candidate_tempos = gcd_tempo / octave_ratios
-            seed_tempo = float(
-                candidate_tempos[np.argmin(np.abs(candidate_tempos - self.kalman_gate.mean))]
-            )
-            self._reinit_from_tempo(seed_tempo, sigma=getattr(self.config, 'GCD_REINIT_SIGMA', 3.0))
+            # gcd_tempoは_correct_gcd_octave()で既にオクターブ補正済み。
+            self._reinit_from_tempo(gcd_tempo, sigma=getattr(self.config, 'GCD_REINIT_SIGMA', 3.0))
             self._gcd_seeded = True
             logger.debug(
-                "GCD reinit: %.1f BPM (gcd_tempo=%.1f, confidence=%.2f)",
-                seed_tempo, gcd_tempo, gcd_conf
+                "GCD reinit: %.1f BPM (confidence=%.2f)",
+                gcd_tempo, gcd_conf
             )
 
-        # ── 5b. Convergence check ─────────────────────────────────────────────
+        # ── 4b. Convergence check ────────────────────────────────────────────
         # Normally block HIHAT events: skipped weight update leaves uniform weights
         # (ESS=N → confidence=1.0), which would falsely declare convergence.
         # Exception: allow HIHAT when GCD has high confidence — in that case
@@ -208,7 +285,7 @@ class ParticleFilter:
                 result.confidence,
             )
 
-        # ── 6. Kalman gate (+ streak-based feedback seeding) ─────────────────
+        # ── 5. Kalman gate (+ streak-based feedback seeding) ─────────────────
         gate_result = self.kalman_gate.update(result.tempo_bpm, result.confidence)
 
         if not self._converged:
@@ -220,7 +297,7 @@ class ParticleFilter:
                 if self._kalman_reject_streak >= streak_limit:
                     self._seed_from_kalman()
 
-        # ── 7. Autocorr seeding (pre-convergence, non-HIHAT events only) ─────
+        # ── 6. Autocorr seeding (pre-convergence, non-HIHAT events only) ─────
         # Restrict seeding to kick/snare/others: HIHAT's dense subdivisions produce
         # IOIs that dominate the autocorr buffer and map to the wrong octave
         # (e.g. 16th notes at 80 BPM → 320 BPM → seeds at 160 BPM, not 80).
@@ -243,7 +320,7 @@ class ParticleFilter:
                     seed_bpm, best_bpm, strength,
                 )
 
-        # ── 8. Assemble result ────────────────────────────────────────────────
+        # ── 7. Assemble result ────────────────────────────────────────────────
         result = dataclasses.replace(
             result,
             is_converged=self._converged,
@@ -286,6 +363,8 @@ class ParticleFilter:
         self._gcd_seeded = False
         self._prev_tempo = None
         self._kalman_reject_streak = 0
+        self._pending_group = []
+        self._pending_group_start = None
         if self._autocorr is not None:
             self._autocorr.reset()
         self.midi_gate.reset()
@@ -400,6 +479,12 @@ class ParticleFilter:
         np.clip(new_tempos, self.config.TEMPO_MIN, self.config.TEMPO_MAX, out=new_tempos)
         self.tempos[seed_idx]      = new_tempos
         self.beat_phases[seed_idx] = np.random.uniform(0.0, 1.0, n_seed)
+
+    def _correct_gcd_octave(self, gcd_tempo: float) -> float:
+        """gcd_tempoをGCD_OCTAVE_RATIOSで割り、Kalman平均に最も近い候補を返す。"""
+        octave_ratios    = np.asarray(self.config.GCD_OCTAVE_RATIOS, dtype=np.float64)
+        candidate_tempos = gcd_tempo / octave_ratios
+        return float(candidate_tempos[np.argmin(np.abs(candidate_tempos - self.kalman_gate.mean))])
 
     def _reinit_from_tempo(self, tempo: float, sigma: float) -> None:
         """指定テンポの周辺に全粒子を再配置する。"""

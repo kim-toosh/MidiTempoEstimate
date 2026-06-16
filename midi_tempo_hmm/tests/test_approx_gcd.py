@@ -106,6 +106,7 @@ def test_kick_snare_combined() -> None:
     # IOI列: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
 
     tempo, conf = estimate_tempo_from_timestamps(combined, config)
+    print("tempo=",tempo)
     assert tempo is not None, "Should estimate a tempo"
     assert abs(tempo - 120.0) < 2.0, f"Expected ~120 BPM, got {tempo:.2f}"
     assert conf >= 0.8, f"Expected high confidence, got {conf:.3f}"

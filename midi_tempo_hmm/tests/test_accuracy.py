@@ -21,6 +21,9 @@ def _run_filter(timestamps: list[float]) -> list:
         r = pf.update(ts)
         if r is not None:
             results.append(r)
+    final = pf.flush(timestamps[-1] + pf.span_same_time)
+    if final is not None:
+        results.append(final)
     return results
 
 

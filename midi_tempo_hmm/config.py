@@ -97,7 +97,7 @@ CRASH_DRUM_WEIGHT:  float = 0.8
 
 # ── 近似GCD推定器 ─────────────────────────────────────────────────────────────
 GCD_MIN_EVENTS:           int   = 4      # 推定を開始する最低イベント数（Kick+Snare+HiHat合算）
-GCD_BUFFER_SIZE:          int   = 8      # タイムスタンプの保持数
+GCD_BUFFER_SIZE:          int   = 6      # タイムスタンプの保持数
 GCD_RESOLUTION:           float = 0.002  # 候補GCDの刻み幅（秒）
 GCD_TOLERANCE:            float = 0.15   # 残差の許容割合
 GCD_CONFIDENCE_THRESHOLD: float = 0.70   # この値以上で粒子初期化に使用
@@ -111,3 +111,12 @@ GCD_REINIT_SIGMA:         float = 3.0    # 粒子再初期化時のガウス分�
 # 最大倍率(=16)は、approx_gcdの探索下限(g_min)と最終レンジチェックの上限
 # (TEMPO_MAX*max(GCD_OCTAVE_RATIOS))の算出にも使用する（approx_gcd.py）。
 GCD_OCTAVE_RATIOS: list[int] = [1, 2, 4, 8, 16]
+
+# ── 同時イベントのグルーピング ───────────────────────────────────────────────
+SPAN_SAME_TIME_SEC: float = 0.10  # この時間内の異なるノートのイベントを同一タイミングとみなす [秒]
+
+# ── イベントタイムアウト ─────────────────────────────────────────────────────
+# 前回イベントからこの時間を超えた場合、GCDタイムスタンプバッファをクリアする
+# （長い無音区間を挟むと、空白期間がIOIとして混入しGCD推定が破綻するため）。
+# 初期値: BPM50, 4/4拍子で5小節分 = 60/50 * 4 * 5 = 24.0 秒
+EVENT_TIMEOUT_SEC: float = 24.0

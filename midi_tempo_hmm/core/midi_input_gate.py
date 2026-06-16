@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from types import ModuleType
 from typing import Optional
@@ -10,6 +11,8 @@ import numpy as np
 
 from midi_tempo_hmm.core.approx_gcd import estimate_tempo_from_timestamps
 from midi_tempo_hmm.core.instrument_category import CategorizedEvent, InstrumentCategory
+
+logger = logging.getLogger(__name__)
 
 # GM standard drum note mappings
 _KICK_NOTES  = frozenset({35, 36})
@@ -60,6 +63,16 @@ class MidiInputGate:
         self.last_gcd_confidence: float = 0.0
         self.last_gcd_iois:       list[float] = []
 
+        # 同時イベントグルーピング用（SPAN_SAME_TIME_SEC内のイベントを平均化）
+        self._group_start: Optional[float] = None
+        self._group_sum:   float = 0.0
+        self._group_count: int   = 0
+
+        # イベントタイムアウト: 前回イベントからこの時間を超えたらGCDバッファを
+        # クリアする。後から動的に変更できるようインスタンス属性として保持する。
+        self.event_timeout: float = getattr(config, 'EVENT_TIMEOUT_SEC', 24.0)
+        self._last_event_time: Optional[float] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -80,6 +93,20 @@ class MidiInputGate:
         if velocity == 0:
             return (None, None, None, 0.0)
 
+        # 前回イベントからevent_timeoutを超えていたら、GCDバッファをクリアする
+        # （長い無音区間を挟むと、空白期間がIOIとして混入しGCD推定が破綻するため）。
+        if (self._last_event_time is not None
+                and timestamp_sec - self._last_event_time > self.event_timeout):
+            gap = timestamp_sec - self._last_event_time
+            logger.debug(
+                "event timeout: gap=%.3fs > %.3fs, clearing gcd_timestamps (had %d entries)",
+                gap, self.event_timeout, len(self.gcd_timestamps),
+            )
+            self.gcd_timestamps.clear()
+            self._group_start = None
+            self._group_count = 0
+        self._last_event_time = timestamp_sec
+
         category    = self._classify(note_number, channel)
         drum_weight = self._drum_weight(note_number, channel, category)
 
@@ -95,13 +122,32 @@ class MidiInputGate:
         )
 
         # GCD推定用タイムスタンプ蓄積（Kick/Snare/HiHat）
+        # SPAN_SAME_TIME_SEC以内の連続イベントは同一タイミングとみなし、
+        # タイムスタンプを平均化してマージする（Snare+HiHat同時打ちのズレを吸収）。
         if category in (InstrumentCategory.KICK, InstrumentCategory.SNARE, InstrumentCategory.HIHAT):
-            self.gcd_timestamps.append(timestamp_sec)
+            span = getattr(self._cfg, 'SPAN_SAME_TIME_SEC', 0.05)
+            if (self.gcd_timestamps
+                    and self._group_start is not None
+                    and timestamp_sec - self._group_start <= span):
+                self._group_sum   += timestamp_sec
+                self._group_count += 1
+                self.gcd_timestamps[-1] = self._group_sum / self._group_count
+            else:
+                self.gcd_timestamps.append(timestamp_sec)
+                self._group_start = timestamp_sec
+                self._group_sum   = timestamp_sec
+                self._group_count = 1
 
         # 同カテゴリIOI計算
         prev = self._last_time[category]
         self._last_time[category] = timestamp_sec
         ioi_sec = None if prev is None else timestamp_sec - prev
+
+        logger.debug(
+            "event: category=%s ts=%.4f ioi=%s",
+            category.name, timestamp_sec,
+            f"{ioi_sec:.4f}" if ioi_sec is not None else None,
+        )
 
         # Kick+Snare合算で近似GCDを計算
         gcd_tempo, gcd_confidence = self._calc_gcd_tempo()
@@ -133,6 +179,10 @@ class MidiInputGate:
         self.last_gcd_tempo      = None
         self.last_gcd_confidence = 0.0
         self.last_gcd_iois       = []
+        self._last_event_time    = None
+        self._group_start = None
+        self._group_sum   = 0.0
+        self._group_count = 0
 
     def get_stats(self) -> dict:
         """Return a copy of per-category event counts."""
@@ -179,6 +229,11 @@ class MidiInputGate:
         min_events = getattr(self._cfg, 'GCD_MIN_EVENTS', 4)
         if len(combined) < min_events:
             self.last_gcd_iois = []
+            logger.debug(
+                "gcd_timestamps=%s iois=%s (n=%d < min_events=%d), skipping",
+                combined, list(np.diff(np.asarray(combined, dtype=float))),
+                len(combined), min_events,
+            )
             return (None, 0.0)
 
         # GUI表示用に、GCD推定の入力となるIOI列をそのまま保持しておく
@@ -192,4 +247,9 @@ class MidiInputGate:
         #   2. refine_gcd()で加重中央値による反復精密化
         #   3. calc_gcd_confidence()でGCDに対する各IOIの残差から信頼度を算出
         #   4. tempo = 60/gcd に変換。TEMPO_MIN/MAX範囲外なら(None, 0.0)を返す
-        return estimate_tempo_from_timestamps(combined, self._cfg)
+        gcd_tempo, gcd_confidence = estimate_tempo_from_timestamps(combined, self._cfg)
+        logger.debug(
+            "gcd_timestamps=%s iois=%s -> gcd_tempo=%s confidence=%.3f",
+            combined, self.last_gcd_iois, gcd_tempo, gcd_confidence,
+        )
+        return (gcd_tempo, gcd_confidence)

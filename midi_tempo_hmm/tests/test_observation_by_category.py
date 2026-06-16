@@ -88,6 +88,11 @@ def test_category_based_accuracy() -> None:
             results.append(r)
             if r.is_converged and converge_event is None:
                 converge_event = i + 1
+    final = pf.flush(events[-1][0] + pf.span_same_time)
+    if final is not None:
+        results.append(final)
+        if final.is_converged and converge_event is None:
+            converge_event = len(events)
 
     assert len(results) > 0, "No results generated"
     final_avg = float(np.mean([r.tempo_bpm for r in results[-8:]]))
