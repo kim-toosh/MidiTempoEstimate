@@ -272,6 +272,13 @@ class TempoEstimatorApp(QMainWindow):
 
         layout.addStretch(1)
 
+        # ── Status ────────────────────────────────────────────────────────────
+        self._run_status_lbl = QLabel('■  STOPPED')
+        self._run_status_lbl.setFont(QFont('Courier New', 12))
+        self._run_status_lbl.setStyleSheet(f'color: {FG_DIM};')
+        layout.addWidget(self._run_status_lbl)
+        layout.addSpacing(4)
+
         # ── Buttons ───────────────────────────────────────────────────────────
         for text, slot in [
             ('▶  START', self._start),
@@ -671,11 +678,15 @@ class TempoEstimatorApp(QMainWindow):
             )
             self._midi_listener.start()
             self.is_running = True
+            self._run_status_lbl.setText('▶  RUNNING')
+            self._run_status_lbl.setStyleSheet(f'color: {ACCENT_GREEN};')
         except RuntimeError as e:
             print(f"[midi] ERROR: {e}", flush=True)
 
     def _start_mock(self, mode_idx: int) -> None:
         self.is_running = True
+        self._run_status_lbl.setText('▶  RUNNING')
+        self._run_status_lbl.setStyleSheet(f'color: {ACCENT_GREEN};')
         threading.Thread(target=self._mock_thread, args=(mode_idx,), daemon=True).start()
 
     def _stop(self) -> None:
@@ -683,6 +694,8 @@ class TempoEstimatorApp(QMainWindow):
         if self._midi_listener is not None:
             self._midi_listener.stop()
             self._midi_listener = None
+        self._run_status_lbl.setText('■  STOPPED')
+        self._run_status_lbl.setStyleSheet(f'color: {FG_DIM};')
 
     def _stop_and_summarize(self) -> None:
         self._stop()
