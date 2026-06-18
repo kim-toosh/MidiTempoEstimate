@@ -66,6 +66,7 @@ class TwinGate:
         self.event_count += 1
 
         # Mirror MidiInputGate's gcd_timestamps accumulation with category tracking
+        # (Kick/Snare only — HiHat excluded to avoid sub-beat GCD contamination)
         event_timeout = getattr(self.config, 'EVENT_TIMEOUT_SEC', 24.0)
         if (self._last_event_ts is not None
                 and timestamp_sec - self._last_event_ts > event_timeout):
@@ -75,8 +76,7 @@ class TwinGate:
         self._last_event_ts = timestamp_sec
 
         if event.category in (InstrumentCategory.KICK,
-                               InstrumentCategory.SNARE,
-                               InstrumentCategory.HIHAT):
+                               InstrumentCategory.SNARE):
             span = getattr(self.config, 'SPAN_SAME_TIME_SEC', 0.05)
             if (self._gcd_cat_buf
                     and self._gcd_group_start is not None

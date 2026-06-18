@@ -121,10 +121,11 @@ class MidiInputGate:
             drum_weight=drum_weight,
         )
 
-        # GCD推定用タイムスタンプ蓄積（Kick/Snare/HiHat）
+        # GCD推定用タイムスタンプ蓄積（Kick/Snare のみ）
+        # HiHatは拍の細分化を担うため混入するとGCDが細かいリズム単位を拾いやすい。
         # SPAN_SAME_TIME_SEC以内の連続イベントは同一タイミングとみなし、
-        # タイムスタンプを平均化してマージする（Snare+HiHat同時打ちのズレを吸収）。
-        if category in (InstrumentCategory.KICK, InstrumentCategory.SNARE, InstrumentCategory.HIHAT):
+        # タイムスタンプを平均化してマージする（Snare+Kick同時打ちのズレを吸収）。
+        if category in (InstrumentCategory.KICK, InstrumentCategory.SNARE):
             span = getattr(self._cfg, 'SPAN_SAME_TIME_SEC', 0.05)
             if (self.gcd_timestamps
                     and self._group_start is not None
@@ -216,8 +217,8 @@ class MidiInputGate:
         return self._cat_weight[category]
 
     def _calc_gcd_tempo(self) -> tuple[Optional[float], float]:
-        """Kick・Snare・HiHatのタイムスタンプを合算して近似GCDを計算する。"""
-        # Kick/Snare/HiHatを単一バッファに時系列順で蓄積しているため、
+        """Kick・Snareのタイムスタンプを合算して近似GCDを計算する。"""
+        # Kick/Snareを単一バッファに時系列順で蓄積しているため、
         # ソートし直す必要はないが、念のため明示的にソートしておく。
         # 単一バッファにまとめることで、一方のカテゴリの入力が
         # 一定時間途絶えても、もう一方の古いタイムスタンプが
