@@ -28,6 +28,9 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Optional
 
+import tkinter as tk
+from tkinter import ttk
+
 # Allow running as a plain script (`python drum_visualizer.py`) in addition to
 # the canonical `python -m midi_tempo_hmm.drum_visualizer`.  When executed
 # directly, __package__ is None and the project root is not on sys.path, so
@@ -36,22 +39,14 @@ if __package__ is None or __package__ == '':
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib as mpl
-mpl.use('QtAgg')
+mpl.use('TkAgg')
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.collections import LineCollection
 import numpy as np
 import rtmidi
 
 import midi_tempo_hmm.config as config
-
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QComboBox, QSplitter,
-)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
 
 # ── GM Drum note labels ───────────────────────────────────────────────────────
 GM_DRUMS: dict[int, str] = {
@@ -74,28 +69,6 @@ BG_HOVER  = '#45475A'
 FG        = '#CDD6F4'
 FG_DIM    = '#6C7086'
 BORDER    = '#45475A'
-
-_QSS = f"""
-QMainWindow, QWidget {{ background: {BG}; color: {FG}; }}
-QLabel                {{ background: {BG}; color: {FG}; }}
-QComboBox {{
-    background: {BG_WIDGET}; color: {FG};
-    border: 1px solid {BORDER}; border-radius: 4px;
-    padding: 4px 8px; font-size: 12px;
-}}
-QComboBox QAbstractItemView {{
-    background: {BG_WIDGET}; color: {FG};
-    selection-background-color: {BG_HOVER};
-}}
-QPushButton {{
-    background: {BG_WIDGET}; color: {FG};
-    border: none; border-radius: 4px;
-    padding: 6px 12px; font-size: 13px;
-}}
-QPushButton:hover   {{ background: {BG_HOVER}; }}
-QPushButton:pressed {{ background: {BORDER}; }}
-QSplitter::handle   {{ background: {BORDER}; width: 2px; }}
-"""
 
 CMAP            = mpl.colormaps['plasma']  # shared by both graphs
 IOI_HISTORY_LEN = 8                        # max IOI samples kept per note
@@ -161,19 +134,19 @@ class RawMidiCapture:
 
 # ── Main window ───────────────────────────────────────────────────────────────
 
-class DrumVisualizerApp(QMainWindow):
+class DrumVisualizerApp:
     """Two-panel drum visualizer: scrolling IOI map (left) + IOI history bars (right)."""
 
-    def __init__(self, window_sec: float = 10.0) -> None:
-        super().__init__()
+    def __init__(self, root: tk.Tk, window_sec: float = 10.0) -> None:
+        self.root        = root
         self._window_sec = window_sec
 
         # Time-series state
-        self._events:    list[DrumEvent]  = []
-        self._last_time: dict[int, float] = {}
-        self._seen_notes: set[int]        = set()
-        self._queue:     queue.Queue      = queue.Queue()
-        self._capture:   Optional[RawMidiCapture] = None
+        self._events:     list[DrumEvent]  = []
+        self._last_time:  dict[int, float] = {}
+        self._seen_notes: set[int]         = set()
+        self._queue:      queue.Queue      = queue.Queue()
+        self._capture:    Optional[RawMidiCapture] = None
         self._total_events: int = 0
 
         # IOI history state (right panel)
@@ -182,79 +155,88 @@ class DrumVisualizerApp(QMainWindow):
         )
         self._ioi_changed: bool = False
 
-        self.setWindowTitle("Drum MIDI Visualizer")
-        self.resize(1400, 660)
-        self.setStyleSheet(_QSS)
+        root.title("Drum MIDI Visualizer")
+        root.minsize(1000, 500)
+        root.configure(bg=BG)
 
+        self._configure_ttk_style()
         self._build_ui()
-        QTimer.singleShot(0, self._auto_connect)
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(50)   # 50 ms → 20 fps
+        root.protocol('WM_DELETE_WINDOW', self._on_close)
+        root.after(0,  self._auto_connect)
+        root.after(50, self._tick)
+
+    def _configure_ttk_style(self) -> None:
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure('TCombobox',
+                        fieldbackground=BG_WIDGET, background=BG_WIDGET,
+                        foreground=FG, selectbackground=BG_WIDGET,
+                        selectforeground=FG, arrowcolor=FG)
+        style.map('TCombobox',
+                  fieldbackground=[('readonly', BG_WIDGET)],
+                  background=[('readonly', BG_WIDGET)],
+                  foreground=[('readonly', FG)])
+
+    def _mk_btn(self, parent: tk.Widget, text: str, command,
+                width: int = 0) -> tk.Button:
+        kw: dict = dict(text=text, command=command,
+                        bg=BG_WIDGET, fg=FG,
+                        activebackground=BG_HOVER, activeforeground=FG,
+                        relief=tk.FLAT, bd=0, padx=10, pady=4,
+                        font=('Helvetica', 12))
+        if width:
+            kw['width'] = width
+        btn = tk.Button(parent, **kw)
+        btn.bind('<Enter>', lambda e: btn.config(bg=BG_HOVER))
+        btn.bind('<Leave>', lambda e: btn.config(bg=BG_WIDGET))
+        return btn
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        root   = QWidget()
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        toolbar = QWidget()
+        toolbar = tk.Frame(self.root, bg=BG)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 4))
         self._build_toolbar(toolbar)
-        layout.addWidget(toolbar)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(2)
+        paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL,
+                               bg=BORDER, sashwidth=2, sashrelief=tk.FLAT)
+        paned.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        left_host  = QWidget()
-        right_host = QWidget()
-        splitter.addWidget(left_host)
-        splitter.addWidget(right_host)
-        splitter.setSizes([820, 480])
+        left_host  = tk.Frame(paned, bg=BG)
+        right_host = tk.Frame(paned, bg=BG)
+        paned.add(left_host,  width=820, stretch='always')
+        paned.add(right_host, width=480, stretch='always')
 
         self._build_left_canvas(left_host)
         self._build_right_canvas(right_host)
 
-        layout.addWidget(splitter, stretch=1)
+    def _build_toolbar(self, parent: tk.Frame) -> None:
+        tk.Label(parent, text="MIDI PORT:", bg=BG, fg=FG,
+                 font=('Helvetica', 11)).pack(side=tk.LEFT, padx=(0, 4))
 
-    def _build_toolbar(self, parent: QWidget) -> None:
-        h = QHBoxLayout(parent)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(8)
+        self._port_var   = tk.StringVar()
+        self._port_combo = ttk.Combobox(parent, textvariable=self._port_var,
+                                        state='readonly', width=30,
+                                        font=('Helvetica', 11))
+        self._port_combo.pack(side=tk.LEFT, padx=(0, 4))
 
-        h.addWidget(QLabel("MIDI PORT:"))
+        self._mk_btn(parent, "⟳", self._refresh_ports,
+                     width=2).pack(side=tk.LEFT, padx=(0, 4))
 
-        self._port_combo = QComboBox()
-        self._port_combo.setMinimumWidth(240)
-        self._port_combo.setFont(QFont('Helvetica', 11))
-        h.addWidget(self._port_combo)
+        self._conn_btn = self._mk_btn(parent, "Connect", self._toggle_connect)
+        self._conn_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        refresh_btn = QPushButton("⟳")
-        refresh_btn.setFixedWidth(36)
-        refresh_btn.clicked.connect(self._refresh_ports)
-        h.addWidget(refresh_btn)
+        self._mk_btn(parent, "Clear", self._clear).pack(side=tk.LEFT)
 
-        self._conn_btn = QPushButton("Connect")
-        self._conn_btn.clicked.connect(self._toggle_connect)
-        h.addWidget(self._conn_btn)
-
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self._clear)
-        h.addWidget(clear_btn)
-
-        h.addStretch()
-
-        self._count_lbl = QLabel("Events: 0")
-        self._count_lbl.setFont(QFont('Helvetica', 10))
-        h.addWidget(self._count_lbl)
+        self._count_var = tk.StringVar(value="Events: 0")
+        tk.Label(parent, textvariable=self._count_var, bg=BG, fg=FG,
+                 font=('Helvetica', 10)).pack(side=tk.RIGHT)
 
         self._refresh_ports()
 
-    def _build_left_canvas(self, parent: QWidget) -> None:
-        """Scrolling IOI time-series (existing graph)."""
+    def _build_left_canvas(self, parent: tk.Frame) -> None:
+        """Scrolling IOI time-series."""
         self.fig = Figure(facecolor=BG, tight_layout=True)
         self.ax  = self.fig.add_subplot(111)
 
@@ -273,13 +255,11 @@ class DrumVisualizerApp(QMainWindow):
         self.ax.add_collection(self._bar_collection)
         self._dot_scatter = self.ax.scatter([], [], zorder=5, linewidths=0)
 
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def _build_right_canvas(self, parent: QWidget) -> None:
-        """IOI history stacked bar chart (new graph)."""
+    def _build_right_canvas(self, parent: tk.Frame) -> None:
+        """IOI history stacked bar chart."""
         self.fig2 = Figure(facecolor=BG, tight_layout=True)
         self.ax2  = self.fig2.add_subplot(111)
 
@@ -293,23 +273,23 @@ class DrumVisualizerApp(QMainWindow):
         self.ax2.set_ylim(34, 82)
         self.ax2.grid(True, color=BG_WIDGET, linestyle='--', linewidth=0.5, axis='x', zorder=0)
 
-        self.canvas2 = FigureCanvasQTAgg(self.fig2)
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas2)
+        self.canvas2 = FigureCanvasTkAgg(self.fig2, master=parent)
+        self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     # ── Port helpers ──────────────────────────────────────────────────────────
 
     def _refresh_ports(self) -> None:
-        self._port_combo.clear()
         ports = RawMidiCapture.list_ports()
         if ports:
-            self._port_combo.addItems(ports)
+            self._port_combo['values'] = ports
+            self._port_combo.current(0)
         else:
-            self._port_combo.addItem("(no ports found)")
+            self._port_combo['values'] = ['(no ports found)']
+            self._port_combo.current(0)
 
     def _auto_connect(self) -> None:
-        if self._port_combo.count() > 0 and self._port_combo.itemText(0) != "(no ports found)":
+        vals = self._port_combo['values']
+        if vals and vals[0] != '(no ports found)':
             self._connect()
 
     def _toggle_connect(self) -> None:
@@ -319,7 +299,7 @@ class DrumVisualizerApp(QMainWindow):
             self._disconnect()
 
     def _connect(self) -> None:
-        idx = self._port_combo.currentIndex()
+        idx = self._port_combo.current()
         if idx < 0:
             return
         try:
@@ -328,7 +308,7 @@ class DrumVisualizerApp(QMainWindow):
                 on_event=lambda t, n, v: self._queue.put((t, n, v)),
             )
             self._capture.start()
-            self._conn_btn.setText("Disconnect")
+            self._conn_btn.config(text="Disconnect")
         except RuntimeError as e:
             print(f"[drum_viz] {e}", flush=True)
 
@@ -336,7 +316,7 @@ class DrumVisualizerApp(QMainWindow):
         if self._capture is not None:
             self._capture.stop()
             self._capture = None
-        self._conn_btn.setText("Connect")
+        self._conn_btn.config(text="Connect")
 
     def _clear(self) -> None:
         while not self._queue.empty():
@@ -350,7 +330,7 @@ class DrumVisualizerApp(QMainWindow):
         self._ioi_history.clear()
         self._ioi_changed = False
         self._total_events = 0
-        self._count_lbl.setText("Events: 0")
+        self._count_var.set("Events: 0")
 
         self._bar_collection.set_segments([])
         self._dot_scatter.set_offsets(np.zeros((0, 2)))
@@ -363,7 +343,7 @@ class DrumVisualizerApp(QMainWindow):
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
-        """Drain the MIDI queue then redraw. Called every 50 ms on the main thread."""
+        """Drain the MIDI queue then redraw. Rescheduled every 50 ms."""
         try:
             while True:
                 timestamp, note, velocity = self._queue.get_nowait()
@@ -388,6 +368,8 @@ class DrumVisualizerApp(QMainWindow):
             self._draw_ioi_history()
             self._ioi_changed = False
 
+        self.root.after(50, self._tick)
+
     # ── Left panel: time-series ───────────────────────────────────────────────
 
     def _draw_timeseries(self) -> None:
@@ -409,7 +391,7 @@ class DrumVisualizerApp(QMainWindow):
             c    = CMAP(ev.velocity / 127)
             v    = ev.velocity / 127          # 0.0 〜 1.0
             lw   = 1.0 + v * 15.0            # linewidth: 1.0 (soft) 〜 16.0 (hard)
-            ds   = (lw + 5) ** 2             # dot diameter = lw+5 pt → 常に線幅より大きい
+            ds   = (lw + 5) ** 2             # dot diameter always larger than linewidth
             dot_xy.append([x, ev.note])
             dot_colors.append(c)
             dot_sizes.append(ds)
@@ -438,7 +420,7 @@ class DrumVisualizerApp(QMainWindow):
             self.ax.set_yticklabels([_note_label(n) for n in notes], fontsize=8)
             self.ax.tick_params(axis='y', labelcolor=FG, colors=FG)
 
-        self._count_lbl.setText(f"Events: {self._total_events}")
+        self._count_var.set(f"Events: {self._total_events}")
         self.canvas.draw_idle()
 
     # ── Right panel: IOI history ──────────────────────────────────────────────
@@ -476,7 +458,6 @@ class DrumVisualizerApp(QMainWindow):
             n   = len(history)
             x   = 0.0
             for i, ioi in enumerate(history):   # oldest first
-                # Color: map segment index to [0, 1] so oldest=dark, newest=bright
                 norm = i / (IOI_HISTORY_LEN - 1) if IOI_HISTORY_LEN > 1 else 1.0
                 self.ax2.barh(
                     note, ioi, left=x, height=0.6,
@@ -508,10 +489,9 @@ class DrumVisualizerApp(QMainWindow):
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
-    def closeEvent(self, event) -> None:
+    def _on_close(self) -> None:
         self._disconnect()
-        self._timer.stop()
-        super().closeEvent(event)
+        self.root.destroy()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -527,11 +507,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    app  = QApplication(sys.argv)
-    app.setStyle('Fusion')
-    window = DrumVisualizerApp(window_sec=args.window)
-    window.show()
-    sys.exit(app.exec())
+    root = tk.Tk()
+    DrumVisualizerApp(root, window_sec=args.window)
+    root.mainloop()
 
 
 if __name__ == '__main__':

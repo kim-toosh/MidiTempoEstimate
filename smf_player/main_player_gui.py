@@ -1,37 +1,24 @@
-"""SMF Player GUI (PyQt6)."""
+"""SMF Player GUI (Tkinter)."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tkinter as tk
 from pathlib import Path
+from tkinter import filedialog, ttk
+
+# Ensure smf_player/ is on sys.path when run as `python -m smf_player.main_player_gui`
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mido
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QComboBox,
-    QFileDialog,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QMainWindow,
-    QPushButton,
-    QSplitter,
-    QVBoxLayout,
-    QWidget,
-)
 
 from midi_event import BeatMap, PlaybackEvent, build_beat_map, load_midi_events
 from player_engine import PlayerEngine
 
-# ── Colours ────────────────────────────────────────────────────────────────────
+# ── Colours ───────────────────────────────────────────────────────────────────
 BG           = '#1E1E2E'
 BG_LIST      = '#181825'
 BG_WIDGET    = '#313244'
@@ -46,253 +33,206 @@ ACCENT_RED   = '#F38BA8'
 
 SETTINGS_PATH = Path.home() / '.smf_player.json'
 
-STYLESHEET = f"""
-QMainWindow, QWidget {{
-    background-color: {BG};
-    color: {FG};
-}}
-QListWidget {{
-    background-color: {BG_LIST};
-    color: {FG};
-    border: 1px solid {BORDER};
-    font-family: "Courier New";
-    font-size: 10pt;
-}}
-QListWidget::item:selected,
-QListWidget::item:selected:!active {{
-    background-color: {BG_HI};
-    color: {FG_HI};
-}}
-QComboBox {{
-    background-color: {BG_WIDGET};
-    color: {FG};
-    border: 1px solid {BORDER};
-    padding: 3px 6px;
-    min-width: 180px;
-}}
-QComboBox QAbstractItemView {{
-    background-color: {BG_WIDGET};
-    color: {FG};
-    selection-background-color: {BG_HI};
-    selection-color: {FG_HI};
-}}
-QComboBox::drop-down {{
-    border: none;
-}}
-QPushButton {{
-    background-color: {BG_WIDGET};
-    color: {FG};
-    border: none;
-    padding: 6px 10px;
-    font-size: 11pt;
-    font-family: "Helvetica";
-}}
-QPushButton:hover {{
-    background-color: {BG_HOVER};
-}}
-QPushButton:pressed {{
-    background-color: {BORDER};
-}}
-QCheckBox {{
-    color: {FG};
-    font-family: "Courier New";
-    font-size: 9pt;
-    spacing: 4px;
-}}
-QCheckBox::indicator {{
-    width: 12px;
-    height: 12px;
-    background-color: {BG_WIDGET};
-    border: 1px solid {BORDER};
-}}
-QCheckBox::indicator:checked {{
-    background-color: {BG_HI};
-}}
-QLabel {{
-    color: {FG_DIM};
-    font-family: "Helvetica";
-    font-size: 10pt;
-}}
-QFrame[frameShape="4"],
-QFrame[frameShape="5"] {{
-    color: {BORDER};
-}}
-QSplitter::handle {{
-    background-color: {BORDER};
-}}
-"""
 
+class SmfPlayerApp:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root   = root
+        self.engine : PlayerEngine | None = None
+        self.events : list[PlaybackEvent] = []
+        self._filepath  : str | None = None
+        self._beat_map  : BeatMap | None = None
+        self._programmatic_select = False  # guard against seek during playback highlight
 
-class SmfPlayerWindow(QMainWindow):
-    # Signals for cross-thread communication from playback thread → GUI thread
-    _sig_event_played     = pyqtSignal(object)  # PlaybackEvent
-    _sig_playback_finished = pyqtSignal()
+        self.channel_mute_vars: dict[int, tk.BooleanVar] = {
+            ch: tk.BooleanVar(value=False) for ch in range(16)
+        }
 
-    def __init__(self, args) -> None:
-        super().__init__()
-        self.args = args
+        root.title('SMF Player')
+        root.configure(bg=BG)
+        root.minsize(860, 520)
 
-        self.engine: PlayerEngine | None = None
-        self.events: list[PlaybackEvent] = []
-        self._filepath: str | None = None
-        self._beat_map: BeatMap | None = None
-
-        self.channel_mute_vars: dict[int, QCheckBox] = {}
-
-        self.setWindowTitle('SMF Player')
-        self.setMinimumSize(860, 520)
-        self.setStyleSheet(STYLESHEET)
-
+        self._configure_ttk_style()
         self._build_ui()
-        self._sig_event_played.connect(self._apply_event_played)
-        self._sig_playback_finished.connect(self._apply_playback_finished)
+        root.protocol('WM_DELETE_WINDOW', self._on_close)
         self._apply_settings(self._load_settings())
+
+    # ── ttk theme ─────────────────────────────────────────────────────────────
+
+    def _configure_ttk_style(self) -> None:
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure('TCombobox',
+                        fieldbackground=BG_WIDGET, background=BG_WIDGET,
+                        foreground=FG, selectbackground=BG_WIDGET,
+                        selectforeground=FG, arrowcolor=FG)
+        style.map('TCombobox',
+                  fieldbackground=[('readonly', BG_WIDGET)],
+                  foreground=[('readonly', FG)],
+                  selectbackground=[('readonly', BG_WIDGET)],
+                  selectforeground=[('readonly', FG)])
+        style.configure('Vertical.TScrollbar',
+                        background=BG_WIDGET, troughcolor=BG,
+                        arrowcolor=FG_DIM, bordercolor=BG)
+        style.configure('TSeparator', background=BORDER)
 
     # ── UI construction ────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(4)
+        root = self.root
+
+        pane = tk.PanedWindow(root, orient=tk.HORIZONTAL,
+                              bg=BORDER, sashwidth=4, sashrelief=tk.FLAT)
+        pane.pack(fill=tk.BOTH, expand=True)
 
         # ── Left: event list ─────────────────────────────────────────────────
-        self.list_widget = QListWidget()
-        self.list_widget.setFont(QFont('Courier New', 10))
-        self.list_widget.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.list_widget.clicked.connect(self._on_list_click)
-        self.list_widget.doubleClicked.connect(self._on_list_click)
-        splitter.addWidget(self.list_widget)
+        left = tk.Frame(pane, bg=BG)
+        pane.add(left, minsize=450, stretch='always')
+
+        list_frame = tk.Frame(left, bg=BG)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL,
+                                  style='Vertical.TScrollbar')
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.listbox = tk.Listbox(
+            list_frame,
+            font=('Courier New', 10),
+            bg=BG_LIST, fg=FG,
+            selectbackground=BG_HI, selectforeground=FG_HI,
+            activestyle='none',
+            selectmode=tk.SINGLE,
+            yscrollcommand=scrollbar.set,
+            borderwidth=0, highlightthickness=0,
+        )
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.listbox.yview)
+        self.listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
 
         # ── Right: control panel ─────────────────────────────────────────────
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.setSpacing(4)
-        right_widget.setMaximumWidth(320)
-        right_widget.setMinimumWidth(260)
+        right = tk.Frame(pane, bg=BG, width=300)
+        pane.add(right, minsize=260, stretch='never')
 
-        # MIDI output port
-        right_layout.addWidget(self._dim_label('MIDI Output Port'))
-        port_row = QHBoxLayout()
-        self._port_combo = QComboBox()
+        pad = dict(padx=10, pady=3)
+
+        def _sep() -> None:
+            ttk.Separator(right, orient=tk.HORIZONTAL).pack(
+                fill=tk.X, padx=8, pady=5)
+
+        def _dim_lbl(text: str) -> tk.Label:
+            return tk.Label(right, text=text, bg=BG, fg=FG_DIM,
+                            font=('Helvetica', 9))
+
+        # MIDI Output Port
+        _dim_lbl('MIDI Output Port').pack(anchor='w', **pad)
+        port_row = tk.Frame(right, bg=BG)
+        port_row.pack(fill=tk.X, padx=10, pady=2)
+        self._port_var   = tk.StringVar()
+        self._port_combo = ttk.Combobox(
+            port_row, textvariable=self._port_var, state='readonly', width=22)
+        self._port_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._mk_btn(port_row, '⟳', self._refresh_ports,
+                     width=2).pack(side=tk.LEFT, padx=(4, 0))
         self._refresh_ports()
-        port_row.addWidget(self._port_combo, stretch=1)
-        refresh_btn = QPushButton('⟳')
-        refresh_btn.setFixedWidth(32)
-        refresh_btn.clicked.connect(self._refresh_ports)
-        port_row.addWidget(refresh_btn)
-        right_layout.addLayout(port_row)
 
-        right_layout.addWidget(self._separator())
+        _sep()
 
-        # Status row: state indicator + BPM + measure/beat
-        status_row = QHBoxLayout()
-        self._status_label = QLabel('■  STOPPED')
-        self._status_label.setFont(QFont('Courier New', 11))
-        self._status_label.setStyleSheet(f'color: {FG_DIM};')
-        self._bpm_label = QLabel('')
-        self._bpm_label.setFont(QFont('Courier New', 11))
-        self._bpm_label.setStyleSheet(f'color: {FG_DIM};')
-        self._bpm_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._beat_label = QLabel('')
-        self._beat_label.setFont(QFont('Courier New', 11))
-        self._beat_label.setStyleSheet(f'color: {FG_DIM};')
-        self._beat_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        status_row.addWidget(self._status_label)
-        status_row.addWidget(self._bpm_label, stretch=1)
-        status_row.addWidget(self._beat_label)
-        right_layout.addLayout(status_row)
+        # Status row: state + BPM + MEAS/BEAT
+        status_row = tk.Frame(right, bg=BG)
+        status_row.pack(fill=tk.X, **pad)
+        self._status_var = tk.StringVar(value='■  STOPPED')
+        self._status_lbl = tk.Label(status_row, textvariable=self._status_var,
+                                    bg=BG, fg=FG_DIM,
+                                    font=('Courier New', 11))
+        self._status_lbl.pack(side=tk.LEFT)
+        self._bpm_var = tk.StringVar(value='')
+        tk.Label(status_row, textvariable=self._bpm_var,
+                 bg=BG, fg=FG_DIM,
+                 font=('Courier New', 11)).pack(side=tk.LEFT, padx=(8, 0))
+        self._beat_var = tk.StringVar(value='')
+        tk.Label(status_row, textvariable=self._beat_var,
+                 bg=BG, fg=FG_DIM,
+                 font=('Courier New', 11)).pack(side=tk.RIGHT)
 
-        right_layout.addWidget(self._separator())
+        _sep()
 
         # Playback buttons
-        for text, slot in [
+        for text, cmd in [
             ('▶  START', self._on_start),
             ('⏸  STOP',  self._on_stop),
             ('⏮  RESET', self._on_reset),
         ]:
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
-            right_layout.addWidget(btn)
+            self._mk_btn(right, text, cmd).pack(fill=tk.X, padx=10, pady=2)
 
-        right_layout.addWidget(self._separator())
+        _sep()
 
-        # Channel mute
-        right_layout.addWidget(self._dim_label('Channel Mute'))
-        mute_grid = QGridLayout()
-        mute_grid.setHorizontalSpacing(4)
-        mute_grid.setVerticalSpacing(2)
+        # Channel Mute
+        _dim_lbl('Channel Mute').pack(anchor='w', **pad)
+        mute_frame = tk.Frame(right, bg=BG)
+        mute_frame.pack(anchor='w', padx=10, pady=2)
         for ch in range(16):
             row, col = divmod(ch, 4)
             label = f'Ch{ch + 1:02d}'
             if ch == 9:
                 label += '(D)'
-            cb = QCheckBox(label)
-            cb.stateChanged.connect(
-                lambda state, c=ch: self._on_channel_mute_toggle(c))
-            self.channel_mute_vars[ch] = cb
-            mute_grid.addWidget(cb, row, col)
-        right_layout.addLayout(mute_grid)
+            tk.Checkbutton(
+                mute_frame, text=label,
+                variable=self.channel_mute_vars[ch],
+                command=lambda c=ch: self._on_mute_toggle(c),
+                bg=BG, fg=FG, selectcolor=BG_WIDGET,
+                activebackground=BG, activeforeground=FG,
+                font=('Courier New', 9),
+            ).grid(row=row, column=col, sticky='w', padx=2, pady=1)
 
-        right_layout.addWidget(self._separator())
+        _sep()
 
         # Open file button
-        open_btn = QPushButton('Open MIDI File...')
-        open_btn.clicked.connect(self._on_open_file)
-        right_layout.addWidget(open_btn)
+        self._mk_btn(right, 'Open MIDI File...', self._on_open_file).pack(
+            fill=tk.X, padx=10, pady=2)
 
-        right_layout.addWidget(self._separator())
+        _sep()
 
         # File name display
-        self._file_label = QLabel('(no file)')
-        self._file_label.setFont(QFont('Courier New', 9))
-        self._file_label.setStyleSheet(f'color: {FG_DIM};')
-        self._file_label.setWordWrap(True)
-        right_layout.addWidget(self._file_label)
+        self._filename_var = tk.StringVar(value='(no file)')
+        tk.Label(right, textvariable=self._filename_var,
+                 bg=BG, fg=FG_DIM,
+                 font=('Courier New', 9),
+                 wraplength=220, justify='left').pack(anchor='w', padx=10, pady=2)
 
         # Position display
-        self._pos_label  = QLabel('Event: --- / ---')
-        self._time_label = QLabel('Time:  --- / ---')
-        self._pos_label.setFont(QFont('Courier New', 10))
-        self._time_label.setFont(QFont('Courier New', 10))
-        right_layout.addWidget(self._pos_label)
-        right_layout.addWidget(self._time_label)
-
-        right_layout.addStretch()
-
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-
-        self.setCentralWidget(splitter)
+        self._pos_var  = tk.StringVar(value='Event: --- / ---')
+        self._time_var = tk.StringVar(value='Time:  --- / ---')
+        tk.Label(right, textvariable=self._pos_var,
+                 bg=BG, fg=FG_DIM,
+                 font=('Courier New', 10)).pack(anchor='w', padx=10, pady=1)
+        tk.Label(right, textvariable=self._time_var,
+                 bg=BG, fg=FG_DIM,
+                 font=('Courier New', 10)).pack(anchor='w', padx=10, pady=1)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
-    def _dim_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(f'color: {FG_DIM};')
-        return lbl
-
-    def _separator(self) -> QFrame:
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setStyleSheet(f'color: {BORDER}; margin: 4px 0;')
-        return line
+    def _mk_btn(self, parent: tk.Widget, text: str, cmd,
+                width: int | None = None) -> tk.Button:
+        kw: dict = {}
+        if width is not None:
+            kw['width'] = width
+        return tk.Button(
+            parent, text=text, command=cmd,
+            bg=BG_WIDGET, fg=FG,
+            activebackground=BG_HOVER, activeforeground=FG,
+            relief=tk.FLAT, padx=6, pady=5,
+            font=('Helvetica', 11), cursor='hand2',
+            **kw,
+        )
 
     def _refresh_ports(self) -> None:
-        current = self._port_combo.currentText()
-        self._port_combo.clear()
         ports = mido.get_output_names()
-        for p in ports:
-            self._port_combo.addItem(p)
-        if current in ports:
-            self._port_combo.setCurrentText(current)
-        elif ports:
-            self._port_combo.setCurrentIndex(0)
+        self._port_combo['values'] = ports
+        if self._port_var.get() not in ports and ports:
+            self._port_combo.current(0)
 
     def _current_port(self) -> str | None:
-        val = self._port_combo.currentText()
+        val = self._port_var.get()
         return val if val else None
 
     def _ensure_engine(self) -> bool:
@@ -301,60 +241,53 @@ class SmfPlayerWindow(QMainWindow):
             return False
         if self.engine is None:
             self.engine = PlayerEngine(port)
-            self._wire_callbacks()
-            for ch, cb in self.channel_mute_vars.items():
-                if cb.isChecked():
+            self.engine.on_event_played      = self._cb_event_played
+            self.engine.on_playback_finished = self._cb_playback_finished
+            for ch, var in self.channel_mute_vars.items():
+                if var.get():
                     self.engine.set_channel_mute(ch, True)
         return True
 
-    def _wire_callbacks(self) -> None:
-        if self.engine is None:
-            return
-        self.engine.on_event_played      = self._on_event_played
-        self.engine.on_playback_finished = self._on_playback_finished
-
-    def _update_position_display(self, index: int | None = None) -> None:
-        total = len(self.events)
-        if index is None:
-            idx = self.engine.current_index if self.engine else 0
-        else:
-            idx = index
-
-        if total == 0:
-            self._pos_label.setText('Event: --- / ---')
-            self._time_label.setText('Time:  --- / ---')
-            return
-
-        idx_disp   = min(idx, total - 1)
-        ev         = self.events[idx_disp]
-        total_time = self.events[-1].abs_time_sec
-
-        self._pos_label.setText(f'Event: {idx_disp + 1:04d} / {total:04d}')
-        self._time_label.setText(
-            f'Time:  {ev.abs_time_sec:7.3f}s / {total_time:.3f}s')
-
     def _set_status(self, text: str, color: str) -> None:
-        self._status_label.setText(text)
-        self._status_label.setStyleSheet(f'color: {color};')
+        self._status_var.set(text)
+        self._status_lbl.config(fg=color)
 
     def _update_beat_display(self, sec: float) -> None:
         if self._beat_map is None:
             return
-        bpm     = self._beat_map.sec_to_bpm(sec)
-        m, b    = self._beat_map.sec_to_pos(sec)
-        self._bpm_label.setText(f'{bpm:.1f} BPM')
-        self._beat_label.setText(f'M:{m:03d} B:{b}')
+        bpm  = self._beat_map.sec_to_bpm(sec)
+        m, b = self._beat_map.sec_to_pos(sec)
+        self._bpm_var.set(f'{bpm:.1f} BPM')
+        self._beat_var.set(f'M:{m:03d} B:{b}')
+
+    def _clear_beat_display(self) -> None:
+        self._bpm_var.set('')
+        self._beat_var.set('')
 
     def _highlight_row(self, index: int) -> None:
-        self.list_widget.blockSignals(True)
-        self.list_widget.setCurrentRow(index)
-        self.list_widget.blockSignals(False)
-        item = self.list_widget.item(index)
-        if item is not None:
-            self.list_widget.scrollToItem(
-                item, QListWidget.ScrollHint.EnsureVisible)
+        self._programmatic_select = True
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(index)
+        self.listbox.see(index)
+        self._programmatic_select = False
 
-    # ── Settings persistence ───────────────────────────────────────────────────
+    def _update_position_display(self, index: int | None = None) -> None:
+        total = len(self.events)
+        if total == 0:
+            self._pos_var.set('Event: --- / ---')
+            self._time_var.set('Time:  --- / ---')
+            return
+        if index is None:
+            idx = self.engine.current_index if self.engine else 0
+        else:
+            idx = index
+        idx_disp   = min(idx, total - 1)
+        ev         = self.events[idx_disp]
+        total_time = self.events[-1].abs_time_sec
+        self._pos_var.set(f'Event: {idx_disp + 1:04d} / {total:04d}')
+        self._time_var.set(f'Time:  {ev.abs_time_sec:7.3f}s / {total_time:.3f}s')
+
+    # ── Settings ──────────────────────────────────────────────────────────────
 
     def _load_settings(self) -> dict:
         try:
@@ -363,12 +296,10 @@ class SmfPlayerWindow(QMainWindow):
             return {}
 
     def _save_settings(self) -> None:
-        settings: dict = {
+        settings = {
             'last_file': self._filepath,
-            'channel_mutes': {
-                str(ch): cb.isChecked()
-                for ch, cb in self.channel_mute_vars.items()
-            },
+            'channel_mutes': {str(ch): var.get()
+                               for ch, var in self.channel_mute_vars.items()},
         }
         try:
             SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
@@ -379,18 +310,17 @@ class SmfPlayerWindow(QMainWindow):
         for ch_str, muted in settings.get('channel_mutes', {}).items():
             ch = int(ch_str)
             if ch in self.channel_mute_vars:
-                self.channel_mute_vars[ch].setChecked(bool(muted))
-
+                self.channel_mute_vars[ch].set(bool(muted))
         last_file = settings.get('last_file')
         if last_file and Path(last_file).exists():
-            QTimer.singleShot(200, lambda: self._load_file(last_file))
+            self.root.after(200, lambda: self._load_file(last_file))
 
-    # ── Event handlers ─────────────────────────────────────────────────────────
+    # ── Event handlers ────────────────────────────────────────────────────────
 
     def _on_open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Open MIDI File', '',
-            'MIDI files (*.mid *.midi);;All files (*.*)',
+        path = filedialog.askopenfilename(
+            title='Open MIDI File',
+            filetypes=[('MIDI files', '*.mid *.midi'), ('All files', '*.*')],
         )
         if path:
             self._load_file(path)
@@ -400,15 +330,13 @@ class SmfPlayerWindow(QMainWindow):
         self._filepath = path
         self._beat_map = build_beat_map(path)
 
-        self._file_label.setText(Path(path).name)
+        self._filename_var.set(Path(path).name)
 
-        self.list_widget.clear()
+        self.listbox.delete(0, tk.END)
         for ev in self.events:
-            self.list_widget.addItem(QListWidgetItem(ev.display_text))
+            self.listbox.insert(tk.END, ev.display_text)
 
-        self.list_widget.setCurrentRow(-1)
-        self._bpm_label.setText('')
-        self._beat_label.setText('')
+        self._clear_beat_display()
         self._update_position_display(0)
         self._set_status('■  STOPPED', FG_DIM)
 
@@ -435,89 +363,82 @@ class SmfPlayerWindow(QMainWindow):
         if self.engine:
             self.engine.stop()
             self.engine.seek(0)
-
-        self.list_widget.setCurrentRow(-1)
-        self._bpm_label.setText('')
-        self._beat_label.setText('')
+        self.listbox.selection_clear(0, tk.END)
+        self._clear_beat_display()
         self._update_position_display(0)
         self._set_status('■  STOPPED', FG_DIM)
 
-    def _on_list_click(self) -> None:
-        if not self.engine or not self.events:
+    def _on_listbox_select(self, _event: tk.Event) -> None:
+        if self._programmatic_select:
             return
-        index = self.list_widget.currentRow()
-        if index < 0:
+        sel = self.listbox.curselection()
+        if not sel or not self.events:
             return
-        self.engine.seek(index)
+        index = sel[0]
+        if self.engine:
+            self.engine.seek(index)
         self._update_position_display(index)
         if self._beat_map is not None:
             self._update_beat_display(self.events[index].abs_time_sec)
 
-    def _on_event_played(self, ev: PlaybackEvent) -> None:
-        # Called from playback thread — emit to GUI thread via queued signal
-        self._sig_event_played.emit(ev)
+    def _on_mute_toggle(self, channel: int) -> None:
+        if self.engine:
+            self.engine.set_channel_mute(channel, self.channel_mute_vars[channel].get())
+
+    # ── Playback callbacks (playback thread → main thread) ───────────────────
+
+    def _cb_event_played(self, ev: PlaybackEvent) -> None:
+        self.root.after(0, lambda: self._apply_event_played(ev))
 
     def _apply_event_played(self, ev: PlaybackEvent) -> None:
-        # Runs in GUI thread
         self._highlight_row(ev.index)
         self._update_position_display(ev.index)
         self._update_beat_display(ev.abs_time_sec)
 
-    def _on_playback_finished(self) -> None:
-        self._sig_playback_finished.emit()
+    def _cb_playback_finished(self) -> None:
+        self.root.after(0, self._apply_playback_finished)
 
     def _apply_playback_finished(self) -> None:
-        self._pos_label.setText('再生終了 — RESET で先頭に戻る')
+        self._pos_var.set('再生終了 — RESET で先頭に戻る')
         self._set_status('■  FINISHED', ACCENT_RED)
-        self._bpm_label.setText('')
-        self._beat_label.setText('')
+        self._clear_beat_display()
 
-    def _on_channel_mute_toggle(self, channel: int) -> None:
-        if self.engine:
-            self.engine.set_channel_mute(
-                channel, self.channel_mute_vars[channel].isChecked())
-
-    # ── Public helpers (CLI) ───────────────────────────────────────────────────
+    # ── Public helpers (CLI) ──────────────────────────────────────────────────
 
     def set_port(self, port_name: str) -> None:
-        ports = mido.get_output_names()
-        if port_name in ports:
-            self._port_combo.setCurrentText(port_name)
+        if port_name in mido.get_output_names():
+            self._port_var.set(port_name)
 
     def load_file(self, filepath: str) -> None:
         self._load_file(filepath)
 
-    # ── Window close ──────────────────────────────────────────────────────────
+    # ── Close ─────────────────────────────────────────────────────────────────
 
-    def closeEvent(self, event) -> None:
+    def _on_close(self) -> None:
         if self.engine:
             self.engine.stop()
             self.engine.close()
         self._save_settings()
-        event.accept()
+        self.root.destroy()
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='SMF Player')
-    parser.add_argument('--port', type=str, default=None,
-                        help='初期選択する MIDI 出力ポート名')
-    parser.add_argument('--file', type=str, default=None,
-                        help='起動時に読み込む MIDI ファイルパス')
+    parser.add_argument('--port', type=str, default=None)
+    parser.add_argument('--file', type=str, default=None)
     args = parser.parse_args()
 
-    app    = QApplication(sys.argv)
-    window = SmfPlayerWindow(args)
+    root = tk.Tk()
+    app  = SmfPlayerApp(root)
 
     if args.port:
-        window.set_port(args.port)
-
+        app.set_port(args.port)
     if args.file:
-        QTimer.singleShot(100, lambda: window.load_file(args.file))
+        root.after(100, lambda: app.load_file(args.file))
 
-    window.show()
-    sys.exit(app.exec())
+    root.mainloop()
 
 
 if __name__ == '__main__':
