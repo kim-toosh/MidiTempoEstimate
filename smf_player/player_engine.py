@@ -45,6 +45,11 @@ class PlayerEngine:
         if self.is_playing:
             return
 
+        # Wait briefly for any previous thread to exit after stop() signalled it.
+        # The thread exits within ~10 ms; 50 ms timeout is very conservative.
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.05)
+
         if start_index is not None:
             idx = max(0, min(start_index, len(self.events) - 1)) if self.events else 0
             self.current_index    = idx
@@ -58,10 +63,13 @@ class PlayerEngine:
         self._thread.start()
 
     def stop(self) -> None:
+        """Signal stop and return immediately (non-blocking).
+
+        Does NOT join the playback thread to avoid blocking the calling thread
+        (typically the GUI main thread).  play() will wait for the thread to
+        finish before starting a new one.
+        """
         self._stop_flag.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
         self.is_playing = False
 
     def seek(self, index: int) -> None:
@@ -90,7 +98,11 @@ class PlayerEngine:
             self.muted_channels.discard(channel)
 
     def close(self) -> None:
-        self.stop()
+        self._stop_flag.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+        self.is_playing = False
         self.outport.close()
 
     # ------------------------------------------------------------------

@@ -33,6 +33,17 @@ ACCENT_RED   = '#F38BA8'
 
 SETTINGS_PATH = Path.home() / '.smf_player.json'
 
+# (mido type string, display label) — channel messages only
+_MSG_TYPES: list[tuple[str, str]] = [
+    ('note_on',        'Note On'),
+    ('note_off',       'Note Off'),
+    ('control_change', 'Ctrl Chg'),
+    ('program_change', 'Prog Chg'),
+    ('polytouch',      'Poly Press'),
+    ('aftertouch',     'Ch Press'),
+    ('pitchwheel',     'Pitch Bend'),
+]
+
 
 class SmfPlayerApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -46,10 +57,16 @@ class SmfPlayerApp:
         self.channel_mute_vars: dict[int, tk.BooleanVar] = {
             ch: tk.BooleanVar(value=False) for ch in range(16)
         }
+        self.msg_type_show_vars: dict[str, tk.BooleanVar] = {
+            mtype: tk.BooleanVar(value=False) for mtype, _ in _MSG_TYPES
+        }
+        self._listbox_to_event: list[int] = []   # listbox row → events index
+        self._event_to_listbox: dict[int, int] = {}  # events index → listbox row
 
         root.title('SMF Player')
         root.configure(bg=BG)
-        root.minsize(860, 520)
+        root.minsize(860, 620)
+        root.geometry('860x620')
 
         self._configure_ttk_style()
         self._build_ui()
@@ -186,6 +203,23 @@ class SmfPlayerApp:
 
         _sep()
 
+        # Event Type Filter
+        _dim_lbl('Event Type').pack(anchor='w', **pad)
+        etype_frame = tk.Frame(right, bg=BG)
+        etype_frame.pack(anchor='w', padx=10, pady=2)
+        for i, (mtype, label) in enumerate(_MSG_TYPES):
+            row, col = divmod(i, 2)
+            tk.Checkbutton(
+                etype_frame, text=label,
+                variable=self.msg_type_show_vars[mtype],
+                command=self._on_msg_type_toggle,
+                bg=BG, fg=FG, selectcolor=BG_WIDGET,
+                activebackground=BG, activeforeground=FG,
+                font=('Courier New', 9),
+            ).grid(row=row, column=col, sticky='w', padx=2, pady=1)
+
+        _sep()
+
         # Open file button
         self._mk_btn(right, 'Open MIDI File...', self._on_open_file).pack(
             fill=tk.X, padx=10, pady=2)
@@ -264,11 +298,44 @@ class SmfPlayerApp:
         self._bpm_var.set('')
         self._beat_var.set('')
 
-    def _highlight_row(self, index: int) -> None:
+    def _rebuild_listbox(self) -> None:
+        """Rebuild listbox applying channel-mute and event-type-show filters.
+
+        Channel mute : checked   = hidden  (blacklist)
+        Event type   : checked   = visible (whitelist); none checked = show all
+        Non-channel messages (meta, sysex, …) are always visible.
+        """
+        show_types = {m for m, v in self.msg_type_show_vars.items() if v.get()}
+
+        self.listbox.delete(0, tk.END)
+        self._listbox_to_event = []
+        self._event_to_listbox = {}
+        prev_vis_sec = 0.0
+        for ev in self.events:
+            if ev.channel is not None and self.channel_mute_vars[ev.channel].get():
+                continue
+            # whitelist active + known channel-message type + not in whitelist → hide
+            if show_types and ev.msg_type in self.msg_type_show_vars and ev.msg_type not in show_types:
+                continue
+            lb_idx = len(self._listbox_to_event)
+            # Replace stored diff (from previous event in full list) with
+            # the gap from the previous *visible* event.  diff_str occupies
+            # chars [29:37] in the fixed-width display format.
+            vis_diff = (ev.abs_time_sec - prev_vis_sec) * 1000
+            disp = ev.display_text[:29] + f'd{vis_diff:5.0f}ms' + ev.display_text[37:]
+            self.listbox.insert(tk.END, disp)
+            self._listbox_to_event.append(ev.index)
+            self._event_to_listbox[ev.index] = lb_idx
+            prev_vis_sec = ev.abs_time_sec
+
+    def _highlight_row(self, event_index: int) -> None:
+        lb_idx = self._event_to_listbox.get(event_index)
+        if lb_idx is None:
+            return  # event is on a muted channel — skip highlight
         self._programmatic_select = True
         self.listbox.selection_clear(0, tk.END)
-        self.listbox.selection_set(index)
-        self.listbox.see(index)
+        self.listbox.selection_set(lb_idx)
+        self.listbox.see(lb_idx)
         self._programmatic_select = False
 
     def _update_position_display(self, index: int | None = None) -> None:
@@ -300,6 +367,8 @@ class SmfPlayerApp:
             'last_file': self._filepath,
             'channel_mutes': {str(ch): var.get()
                                for ch, var in self.channel_mute_vars.items()},
+            'msg_type_shows': {mtype: var.get()
+                                for mtype, var in self.msg_type_show_vars.items()},
         }
         try:
             SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
@@ -311,6 +380,9 @@ class SmfPlayerApp:
             ch = int(ch_str)
             if ch in self.channel_mute_vars:
                 self.channel_mute_vars[ch].set(bool(muted))
+        for mtype, shown in settings.get('msg_type_shows', {}).items():
+            if mtype in self.msg_type_show_vars:
+                self.msg_type_show_vars[mtype].set(bool(shown))
         last_file = settings.get('last_file')
         if last_file and Path(last_file).exists():
             self.root.after(200, lambda: self._load_file(last_file))
@@ -332,9 +404,7 @@ class SmfPlayerApp:
 
         self._filename_var.set(Path(path).name)
 
-        self.listbox.delete(0, tk.END)
-        for ev in self.events:
-            self.listbox.insert(tk.END, ev.display_text)
+        self._rebuild_listbox()
 
         self._clear_beat_display()
         self._update_position_display(0)
@@ -374,16 +444,21 @@ class SmfPlayerApp:
         sel = self.listbox.curselection()
         if not sel or not self.events:
             return
-        index = sel[0]
+        event_index = self._listbox_to_event[sel[0]]
         if self.engine:
-            self.engine.seek(index)
-        self._update_position_display(index)
+            self.engine.seek(event_index)
+        self._update_position_display(event_index)
         if self._beat_map is not None:
-            self._update_beat_display(self.events[index].abs_time_sec)
+            self._update_beat_display(self.events[event_index].abs_time_sec)
 
     def _on_mute_toggle(self, channel: int) -> None:
         if self.engine:
             self.engine.set_channel_mute(channel, self.channel_mute_vars[channel].get())
+        self._rebuild_listbox()
+
+    def _on_msg_type_toggle(self) -> None:
+        self._rebuild_listbox()
+        self._save_settings()
 
     # ── Playback callbacks (playback thread → main thread) ───────────────────
 
