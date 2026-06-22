@@ -35,7 +35,7 @@ class TwinGate:
         self.event_count = 0
 
         _buf_size = getattr(config, 'GCD_BUFFER_SIZE', 8)
-        self._gcd_cat_buf: deque[tuple[float, InstrumentCategory]] = deque(maxlen=_buf_size)
+        self._gcd_cat_buf: deque[tuple[float, InstrumentCategory, bool]] = deque(maxlen=_buf_size)
         self._last_event_ts: Optional[float] = None
 
         self._gcd_group_start: Optional[float] = None
@@ -88,11 +88,13 @@ class TwinGate:
                     and timestamp_sec - self._gcd_group_start <= span):
                 self._gcd_group_sum   += timestamp_sec
                 self._gcd_group_count += 1
+                has_mixed = (self._gcd_cat_buf[-1][2]
+                             or event.category != self._gcd_group_cat)
                 # avg_ts = self._gcd_group_sum / self._gcd_group_count
-                # self._gcd_cat_buf[-1] = (avg_ts, self._gcd_group_cat)  # 平均値
-                self._gcd_cat_buf[-1] = (self._gcd_group_start, self._gcd_group_cat)  # 最初のイベントの時刻
+                # self._gcd_cat_buf[-1] = (avg_ts, self._gcd_group_cat, has_mixed)  # 平均値
+                self._gcd_cat_buf[-1] = (self._gcd_group_start, self._gcd_group_cat, has_mixed)  # 最初のイベントの時刻
             else:
-                self._gcd_cat_buf.append((timestamp_sec, event.category))
+                self._gcd_cat_buf.append((timestamp_sec, event.category, False))
                 self._gcd_group_start = timestamp_sec
                 self._gcd_group_sum   = timestamp_sec
                 self._gcd_group_count = 1
@@ -138,8 +140,13 @@ class TwinGate:
             if not gr.accepted:
                 cat_buf = list(self._gcd_cat_buf)
                 parts: list[str] = []
-                for i, (ts, cat) in enumerate(cat_buf):
-                    flag = 'K' if cat == InstrumentCategory.KICK else 'S'
+                for i, (ts, cat, has_mixed) in enumerate(cat_buf):
+                    if has_mixed:
+                        flag = 'K+S'
+                    elif cat == InstrumentCategory.KICK:
+                        flag = 'K'
+                    else:
+                        flag = 'S'
                     ts_ms = ts * 1000.0
                     if i == 0:
                         parts.append(f'{flag}:{ts_ms:.1f}ms')
