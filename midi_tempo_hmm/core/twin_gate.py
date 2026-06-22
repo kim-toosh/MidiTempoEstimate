@@ -136,19 +136,21 @@ class TwinGate:
             tempo_bpm       = gr.gated_tempo
 
             if not gr.accepted:
-                buf = list(self.midi_gate.gcd_timestamps)
-                if len(buf) >= 2:
-                    diffs = np.diff(buf)
-                    ts_str    = '  '.join(f'{t:.4f}' for t in buf)
-                    diffs_str = '  '.join(f'{d * 1000:.1f}ms' for d in diffs)
-                else:
-                    ts_str    = '  '.join(f'{t:.4f}' for t in buf)
-                    diffs_str = '(insufficient)'
+                cat_buf = list(self._gcd_cat_buf)
+                parts: list[str] = []
+                for i, (ts, cat) in enumerate(cat_buf):
+                    flag = 'K' if cat == InstrumentCategory.KICK else 'S'
+                    ts_ms = ts * 1000.0
+                    if i == 0:
+                        parts.append(f'{flag}:{ts_ms:.1f}ms')
+                    else:
+                        diff_ms = (ts - cat_buf[i - 1][0]) * 1000.0
+                        parts.append(f'{flag}:{ts_ms:.1f}ms(+{diff_ms:.1f})')
+                buf_str = '  '.join(parts) if parts else '(empty)'
                 logger.warning(
-                    "REJECT(%s) gcd=%.2f BPM  kalman=%.2f BPM  conf=%.2f  "
-                    "buf=[%s]  diffs=[%s]",
+                    "REJECT(%s) gcd=%.2f BPM  kalman=%.2f BPM  conf=%.2f  %s",
                     gr.reject_reason, gcd_tempo, gr.predicted_tempo,
-                    gcd_confidence, ts_str, diffs_str,
+                    gcd_confidence, buf_str,
                 )
 
         # PCO更新（テンポが確定している場合）
