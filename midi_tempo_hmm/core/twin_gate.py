@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from types import ModuleType
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from midi_tempo_hmm.core.instrument_category import InstrumentCategory
 from midi_tempo_hmm.core.kalman_gate import KalmanGate
@@ -130,6 +133,22 @@ class TwinGate:
             kalman_variance = gr.current_var
             kalman_gain     = gr.kalman_gain
             tempo_bpm       = gr.gated_tempo
+
+            if not gr.accepted:
+                buf = list(self.midi_gate.gcd_timestamps)
+                if len(buf) >= 2:
+                    diffs = np.diff(buf)
+                    ts_str    = '  '.join(f'{t:.4f}' for t in buf)
+                    diffs_str = '  '.join(f'{d * 1000:.1f}ms' for d in diffs)
+                else:
+                    ts_str    = '  '.join(f'{t:.4f}' for t in buf)
+                    diffs_str = '(insufficient)'
+                logger.warning(
+                    "REJECT(%s) gcd=%.2f BPM  kalman=%.2f BPM  conf=%.2f  "
+                    "buf=[%s]  diffs=[%s]",
+                    gr.reject_reason, gcd_tempo, gr.predicted_tempo,
+                    gcd_confidence, ts_str, diffs_str,
+                )
 
         # PCO更新（テンポが確定している場合）
         pco = None
