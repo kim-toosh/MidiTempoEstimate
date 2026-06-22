@@ -64,21 +64,24 @@ def _run_twin(args: argparse.Namespace) -> int:
 
     header = (
         f"{'#':>5}  {'Tempo':>8}  {'GCD_T':>7}  {'GCDConf':>7}"
-        f"  {'Gate':>4}  {'KVar':>6}  {'Innov':>8}  {'ms':>6}"
+        f"  {'Gate':>4}  {'KVar':>6}  {'Innov':>8}"
+        f"  {'Phase':>6}  {'PErr':>6}  {'Sync':>4}  {'ms':>6}"
     )
     sep = "─" * len(header)
     print(header)
     print(sep)
 
     def _fmt_result(idx: int, r: TwinGateResult) -> None:
-        gcd_str  = f"{r.gcd_tempo:.2f}" if r.gcd_tempo is not None else "---"
-        gate_str = "AC" if r.gate_accepted else "RE"
-        innov_str = (
-            f"{r.innovation:+.2f}" if r.innovation is not None else "---"
-        )
+        gcd_str   = f"{r.gcd_tempo:.2f}" if r.gcd_tempo is not None else "---"
+        gate_str  = "AC" if r.gate_accepted else "RE"
+        innov_str = f"{r.innovation:+.2f}" if r.innovation is not None else "---"
+        phase_str = f"{r.phase:.3f}" if r.phase is not None else "---"
+        perr_str  = f"{r.phase_error:+.3f}" if r.phase_error is not None else "---"
+        sync_str  = "YES" if r.is_phase_synced else "no"
         print(
             f"{idx:>5}  {r.tempo_bpm:>8.2f}  {gcd_str:>7}  {r.gcd_confidence:>7.2f}"
-            f"  {gate_str:>4}  {r.kalman_variance:>6.2f}  {innov_str:>8}  {r.processing_time_ms:>6.2f}"
+            f"  {gate_str:>4}  {r.kalman_variance:>6.2f}  {innov_str:>8}"
+            f"  {phase_str:>6}  {perr_str:>6}  {sync_str:>4}  {r.processing_time_ms:>6.2f}"
         )
 
     reject_counts: dict[str, int] = {}

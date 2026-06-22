@@ -12,6 +12,7 @@ import numpy as np
 from midi_tempo_hmm.core.instrument_category import InstrumentCategory
 from midi_tempo_hmm.core.kalman_gate import KalmanGate
 from midi_tempo_hmm.core.midi_input_gate import MidiInputGate
+from midi_tempo_hmm.core.phase_oscillator import PhaseOscillator
 from midi_tempo_hmm.output.twin_gate_result import TwinGateResult
 
 
@@ -26,6 +27,7 @@ class TwinGate:
     def __init__(self, config: ModuleType) -> None:
         self.midi_gate   = MidiInputGate(config)
         self.kalman_gate = KalmanGate(config)
+        self.phase_osc   = PhaseOscillator(config)
         self.config      = config
         self.event_count = 0
 
@@ -129,6 +131,18 @@ class TwinGate:
             kalman_gain     = gr.kalman_gain
             tempo_bpm       = gr.gated_tempo
 
+        # PCO更新（テンポが確定している場合）
+        pco = None
+        if tempo_bpm is not None and tempo_bpm > 0:
+            period_sec = 60.0 / tempo_bpm
+            if event.category in (InstrumentCategory.KICK, InstrumentCategory.SNARE):
+                sync_str = getattr(self.config, 'PCO_ETA_PHASE_STRONG', 0.25)
+            elif event.category == InstrumentCategory.HIHAT:
+                sync_str = getattr(self.config, 'PCO_ETA_PHASE_WEAK', 0.05)
+            else:
+                sync_str = getattr(self.config, 'PCO_ETA_PHASE', 0.15)
+            pco = self.phase_osc.update(timestamp_sec, period_sec, sync_str)
+
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         return TwinGateResult(
@@ -151,14 +165,21 @@ class TwinGate:
             mahal_threshold   = mahal_threshold,
             kalman_variance   = kalman_variance,
             kalman_gain       = kalman_gain,
-            event_count       = self.event_count,
+            event_count        = self.event_count,
             processing_time_ms = elapsed_ms,
-            gcd_buffer        = list(self._gcd_cat_buf),
+            gcd_buffer         = list(self._gcd_cat_buf),
+            phase              = pco.phase           if pco else None,
+            phase_error        = pco.phase_error     if pco else None,
+            is_phase_synced    = pco.is_synced       if pco else False,
+            next_beat_time     = pco.next_beat_time  if pco else None,
+            beat_count         = pco.beat_count      if pco else 0,
+            phase_sync_conf    = pco.sync_confidence if pco else 0.0,
         )
 
     def reset(self) -> None:
         self.midi_gate.reset()
         self.kalman_gate.reset()
+        self.phase_osc.reset()
         self.event_count = 0
         self._gcd_cat_buf.clear()
         self._last_event_ts   = None

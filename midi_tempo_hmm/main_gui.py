@@ -155,6 +155,8 @@ class TempoEstimatorApp:
         self._reject_octave = 0
         self._reject_conf   = 0
 
+        self._prev_beat_count = 0
+
         self._configure_ttk_style()
         self._build_ui()
 
@@ -250,6 +252,31 @@ class TempoEstimatorApp:
                                        font=('Courier New', 13, 'bold'))
         self._last_hit_lbl.pack(anchor='w')
 
+        _hdr('PHASE')
+        self._phase_lbl = tk.Label(top, text='phase: ---', bg=BG, fg=FG,
+                                    font=('Courier New', 11))
+        self._phase_lbl.pack(anchor='w')
+        self._phase_canvas = tk.Canvas(top, height=10, bg=BG_GRAPH,
+                                        highlightthickness=0)
+        self._phase_canvas.pack(fill=tk.X, pady=(2, 0))
+        self._phase_err_lbl = tk.Label(top, text='err:   ---', bg=BG, fg=FG_DIM,
+                                        font=('Courier New', 11))
+        self._phase_err_lbl.pack(anchor='w')
+
+        beat_row = tk.Frame(top, bg=BG)
+        beat_row.pack(anchor='w', pady=(2, 0))
+        tk.Label(beat_row, text='BEAT  ', bg=BG, fg=FG_DIM,
+                 font=('Courier New', 11)).pack(side=tk.LEFT)
+        self._beat_canvas = tk.Canvas(beat_row, width=18, height=18,
+                                       bg=BG, highlightthickness=0)
+        self._beat_canvas.pack(side=tk.LEFT)
+        self._beat_oval = self._beat_canvas.create_oval(2, 2, 16, 16,
+                                                         fill=FG_DIM, outline='')
+
+        self._next_beat_lbl = tk.Label(top, text='next:  --- ms', bg=BG, fg=FG_DIM,
+                                        font=('Courier New', 11))
+        self._next_beat_lbl.pack(anchor='w')
+
         # ── BOTTOM: controls ─────────────────────────────────────────────────
 
         self._run_status_lbl = tk.Label(bottom, text='■  STOPPED',
@@ -303,8 +330,8 @@ class TempoEstimatorApp:
     def _build_right(self, parent: tk.Frame) -> None:
         self.fig = Figure(facecolor=BG, tight_layout=False)
         self.fig.subplots_adjust(left=0.08, right=0.88, top=0.95,
-                                  bottom=0.07, hspace=0.75)
-        gs = self.fig.add_gridspec(3, 1, height_ratios=[3, 1, 2])
+                                  bottom=0.06, hspace=0.85)
+        gs = self.fig.add_gridspec(4, 1, height_ratios=[3, 1, 2, 1])
 
         # ── 上段: テンポ推移 ──────────────────────────────────────────────────
         self.ax = self.fig.add_subplot(gs[0])
@@ -347,6 +374,19 @@ class TempoEstimatorApp:
         self.ax_gcd_hist.set_xlabel('Event #', color=FG, fontsize=8)
         self.ax_gcd_hist.set_ylabel('IOI (s)', color=FG, fontsize=8)
         self.ax_gcd_hist.grid(True, color=BG_WIDGET, linestyle='--', linewidth=0.5)
+
+        # ── 4段: Phase Oscillator ─────────────────────────────────────────────
+        self.ax_phase = self.fig.add_subplot(gs[3])
+        self.ax_phase.set_facecolor(BG_GRAPH)
+        self.ax_phase.tick_params(colors=FG, labelcolor=FG, which='both', labelsize=7)
+        for spine in self.ax_phase.spines.values():
+            spine.set_edgecolor(BORDER)
+        self.ax_phase.set_xlabel('Event #', color=FG, fontsize=8)
+        self.ax_phase.set_ylabel('Phase', color=COLOR_PURPLE, fontsize=8)
+        self.ax_phase.set_ylim(0, 1)
+        self.ax_phase.grid(True, color=BG_WIDGET, linestyle='--', linewidth=0.5)
+        self._line_phase, = self.ax_phase.plot([], [], color=COLOR_PURPLE,
+                                                linewidth=1.0)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -456,6 +496,25 @@ class TempoEstimatorApp:
         col = _CAT_COLOR.get(r.category, FG_DIM)
         self._last_hit_lbl.config(text=r.category.name, fg=col)
 
+        if r.phase is not None:
+            self._phase_lbl.config(text=f'phase: {r.phase:.3f}')
+            phase_err = r.phase_error if r.phase_error is not None else 0.0
+            self._phase_err_lbl.config(text=f'err:  {phase_err:+.3f}')
+            bar_color = ACCENT_GREEN if r.is_phase_synced else COLOR_YELLOW
+            w = self._phase_canvas.winfo_width() or 160
+            self._phase_canvas.delete('all')
+            self._phase_canvas.create_rectangle(
+                0, 0, int(w * r.phase), 10, fill=bar_color, outline='')
+            self._next_beat_lbl.config(text=f'beat#: {r.beat_count}')
+            if r.beat_count > self._prev_beat_count:
+                self._beat_canvas.itemconfig(self._beat_oval, fill=ACCENT_GREEN)
+                self.root.after(120, lambda: self._beat_canvas.itemconfig(
+                    self._beat_oval, fill=FG_DIM))
+            self._prev_beat_count = r.beat_count
+        else:
+            self._phase_lbl.config(text='phase: ---')
+            self._phase_err_lbl.config(text='err:   ---')
+
     def _update_graph(self, r: TwinGateResult) -> None:
         self._history.append(r)
         xs = [h.event_count for h in self._history]
@@ -509,6 +568,13 @@ class TempoEstimatorApp:
             self.ax_debug2.set_ylim(0, max(top, 0.1))
 
         self._update_gcd_hist(r)
+
+        xs_p = [h.event_count for h in self._history if h.phase is not None]
+        ys_p = [h.phase       for h in self._history if h.phase is not None]
+        self._line_phase.set_xdata(xs_p)
+        self._line_phase.set_ydata(ys_p)
+        if xs_p:
+            self.ax_phase.set_xlim(xs_p[0], max(xs_p[-1], xs_p[0] + 1))
 
         self.canvas.draw_idle()
 
@@ -666,6 +732,7 @@ class TempoEstimatorApp:
         self._reject_mahal  = 0
         self._reject_octave = 0
         self._reject_conf   = 0
+        self._prev_beat_count = 0
 
         # Reset labels
         self._tempo_var.set('---')
@@ -677,10 +744,17 @@ class TempoEstimatorApp:
         self._kalman_innov_lbl.config(text='innov: ---')
         self._counts_lbl.config(text='K:  0 S:  0\nH:  0 O:  0')
         self._last_hit_lbl.config(text='---', fg=FG_DIM)
+        self._phase_lbl.config(text='phase: ---')
+        self._phase_err_lbl.config(text='err:   ---')
+        self._next_beat_lbl.config(text='beat#: ---')
+        self._phase_canvas.delete('all')
+        self._beat_canvas.itemconfig(self._beat_oval, fill=FG_DIM)
+        self._prev_beat_count = 0
 
         # Reset graph
         for line in (self._line_gcd, self._line_kalman, self._line_reject,
-                     self._line_conf, self._line_var, self._line_mahal, self._line_thr):
+                     self._line_conf, self._line_var, self._line_mahal, self._line_thr,
+                     self._line_phase):
             line.set_xdata([])
             line.set_ydata([])
 

@@ -120,3 +120,10 @@ SPAN_SAME_TIME_SEC: float = 0.10  # この時間内の異なるノートのイ�
 # （長い無音区間を挟むと、空白期間がIOIとして混入しGCD推定が破綻するため）。
 # 初期値: BPM50, 4/4拍子で5小節分 = 60/50 * 4 * 5 = 24.0 秒
 EVENT_TIMEOUT_SEC: float = 24.0
+
+# ── Phase-Coupled Oscillator ─────────────────────────────────────────────────
+PCO_ETA_PHASE        : float = 0.15   # 位相同期の強さ（Others/デフォルト）
+PCO_ETA_PHASE_STRONG : float = 0.25   # Kick/Snare（強拍系）
+PCO_ETA_PHASE_WEAK   : float = 0.05   # HiHat/Others（弱拍系）
+PCO_SYNC_THRESHOLD   : float = 0.10   # 平均位相誤差がこの値以内なら同期確立
+PCO_PREDICTION_ENABLE: bool  = True   # 次Beat予測を有効にするか

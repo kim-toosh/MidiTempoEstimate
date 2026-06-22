@@ -47,3 +47,11 @@ class TwinGateResult:
 
     # --- GCDバッファスナップショット ---
     gcd_buffer        : list  # list[tuple[float, InstrumentCategory]] - category-tagged timestamps
+
+    # --- Phase-Coupled Oscillator ---
+    phase           : Optional[float] = None   # 拍内位相 [0.0, 1.0)
+    phase_error     : Optional[float] = None   # 位相誤差 [-0.5, 0.5]
+    is_phase_synced : bool            = False  # 位相同期確立フラグ
+    next_beat_time  : Optional[float] = None   # 次拍頭の予測絶対時刻 [秒]
+    beat_count      : int             = 0      # 拍頭通過累計回数
+    phase_sync_conf : float           = 0.0    # 位相同期信頼度 [0.0, 1.0]
