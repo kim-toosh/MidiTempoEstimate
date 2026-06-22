@@ -88,8 +88,9 @@ class TwinGate:
                     and timestamp_sec - self._gcd_group_start <= span):
                 self._gcd_group_sum   += timestamp_sec
                 self._gcd_group_count += 1
-                avg_ts = self._gcd_group_sum / self._gcd_group_count
-                self._gcd_cat_buf[-1] = (avg_ts, self._gcd_group_cat)
+                # avg_ts = self._gcd_group_sum / self._gcd_group_count
+                # self._gcd_cat_buf[-1] = (avg_ts, self._gcd_group_cat)  # 平均値
+                self._gcd_cat_buf[-1] = (self._gcd_group_start, self._gcd_group_cat)  # 最初のイベントの時刻
             else:
                 self._gcd_cat_buf.append((timestamp_sec, event.category))
                 self._gcd_group_start = timestamp_sec

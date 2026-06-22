@@ -132,7 +132,8 @@ class MidiInputGate:
                     and timestamp_sec - self._group_start <= span):
                 self._group_sum   += timestamp_sec
                 self._group_count += 1
-                self.gcd_timestamps[-1] = self._group_sum / self._group_count
+                # self.gcd_timestamps[-1] = self._group_sum / self._group_count  # 平均値
+                self.gcd_timestamps[-1] = self._group_start  # 最初のイベントの時刻
             else:
                 self.gcd_timestamps.append(timestamp_sec)
                 self._group_start = timestamp_sec
