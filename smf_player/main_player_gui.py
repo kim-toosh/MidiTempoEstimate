@@ -125,6 +125,10 @@ class SmfPlayerApp:
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.listbox.yview)
         self.listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
+        self.listbox.bind('<Up>',    lambda e: self._on_listbox_key_move(-1) or 'break')
+        self.listbox.bind('<Down>',  lambda e: self._on_listbox_key_move(+1) or 'break')
+        self.listbox.bind('<space>', lambda e: self._on_space() or 'break')
+        root.bind('<space>', lambda e: self._on_space())
 
         # ── Right: control panel ─────────────────────────────────────────────
         right = tk.Frame(pane, bg=BG, width=300)
@@ -413,6 +417,12 @@ class SmfPlayerApp:
         if self.engine is not None:
             self.engine.load(path)
 
+    def _on_space(self) -> None:
+        if self.engine and self.engine.is_playing:
+            self._on_stop()
+        else:
+            self._on_start()
+
     def _on_start(self) -> None:
         if not self.events:
             return
@@ -437,6 +447,25 @@ class SmfPlayerApp:
         self._clear_beat_display()
         self._update_position_display(0)
         self._set_status('■  STOPPED', FG_DIM)
+
+    def _on_listbox_key_move(self, delta: int) -> None:
+        sel = self.listbox.curselection()
+        cur = sel[0] if sel else -1
+        nxt = max(0, min(cur + delta, self.listbox.size() - 1))
+        if nxt == cur:
+            return
+        self._programmatic_select = True
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(nxt)
+        self.listbox.see(nxt)
+        self._programmatic_select = False
+        if self._listbox_to_event:
+            event_index = self._listbox_to_event[nxt]
+            if self.engine:
+                self.engine.seek(event_index)
+            self._update_position_display(event_index)
+            if self._beat_map is not None:
+                self._update_beat_display(self.events[event_index].abs_time_sec)
 
     def _on_listbox_select(self, _event: tk.Event) -> None:
         if self._programmatic_select:
