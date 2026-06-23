@@ -160,6 +160,33 @@ class TempoEstimatorApp:
         self._prev_beat_count = 0
         self._gcd_cand_texts: list = []
 
+        # Render/telemetry controls (UI throttling keeps Tk thread responsive).
+        self._target_render_hz = 15.0
+        self._render_interval_sec = 1.0 / self._target_render_hz
+        self._gcd_hist_interval_sec = 0.20
+        self._last_render_ts = 0.0
+        self._last_gcd_hist_ts = 0.0
+        self._last_perf_log_ts = time.perf_counter()
+
+        self._latest_result: Optional[TwinGateResult] = None
+        self._latest_enqueued_ts: Optional[float] = None
+        self._last_result_seen: Optional[TwinGateResult] = None
+
+        self._produced_count = 0
+        self._consumed_count = 0
+        self._produced_at_last_log = 0
+        self._consumed_at_last_log = 0
+        self._queue_max_depth = 0
+
+        self._perf_samples = {
+            'poll_ms': deque(maxlen=256),
+            'labels_ms': deque(maxlen=256),
+            'graph_ms': deque(maxlen=256),
+            'gcd_hist_ms': deque(maxlen=256),
+            'end_to_end_ms': deque(maxlen=256),
+            'twingate_ms': deque(maxlen=256),
+        }
+
         self._configure_ttk_style()
         self._build_ui()
 
@@ -219,7 +246,7 @@ class TempoEstimatorApp:
         _hdr('TEMPO', margin_top=0)
         self._tempo_var = tk.StringVar(value='---')
         tk.Label(top, textvariable=self._tempo_var, bg=BG, fg=FG,
-                 font=('Courier New', 28, 'bold')).pack(anchor='w')
+                 font=('Courier New', 24, 'bold')).pack(anchor='w')
 
         _hdr('GATE')
         self._gate_lbl = tk.Label(top, text='---', bg=BG, fg=FG_DIM,
@@ -524,7 +551,7 @@ class TempoEstimatorApp:
             self._phase_lbl.config(text='phase: ---')
             self._phase_err_lbl.config(text='err:   ---')
 
-    def _update_graph(self, r: TwinGateResult) -> None:
+    def _update_graph(self, r: TwinGateResult, update_gcd_hist: bool = True) -> None:
         self._history.append(r)
         xs = [h.event_count for h in self._history]
 
@@ -622,7 +649,10 @@ class TempoEstimatorApp:
             top = max(combined) * 1.15
             self.ax_debug2.set_ylim(0, max(top, 0.1))
 
-        self._update_gcd_hist(r)
+        if update_gcd_hist:
+            t_hist0 = time.perf_counter()
+            self._update_gcd_hist(r)
+            self._record_perf('gcd_hist_ms', (time.perf_counter() - t_hist0) * 1000.0)
 
         xs_p = [h.event_count for h in self._history if h.phase is not None]
         ys_p = [h.phase       for h in self._history if h.phase is not None]
@@ -690,6 +720,16 @@ class TempoEstimatorApp:
 
     # ── Queue polling (root.after loop) ──────────────────────────────────────
 
+    def _enqueue_result(self, r: TwinGateResult) -> None:
+        self.result_queue.put((time.perf_counter(), r))
+        self._produced_count += 1
+        try:
+            qd = self.result_queue.qsize()
+            if qd > self._queue_max_depth:
+                self._queue_max_depth = qd
+        except Exception:
+            pass
+
     def _handle_result(self, r: TwinGateResult) -> None:
         self._total_events += 1
         if r.gate_accepted:
@@ -700,18 +740,105 @@ class TempoEstimatorApp:
             self._reject_octave += 1
         elif r.reject_reason == 'confidence':
             self._reject_conf += 1
+
+    def _record_perf(self, key: str, value_ms: float) -> None:
+        samples = self._perf_samples.get(key)
+        if samples is not None:
+            samples.append(value_ms)
+
+    def _p95(self, values: deque[float]) -> float:
+        if not values:
+            return 0.0
+        sorted_values = sorted(values)
+        idx = int(0.95 * (len(sorted_values) - 1))
+        return sorted_values[idx]
+
+    def _avg(self, values: deque[float]) -> float:
+        return (sum(values) / len(values)) if values else 0.0
+
+    def _maybe_log_perf(self, now: float) -> None:
+        interval_sec = 2.0
+        dt = now - self._last_perf_log_ts
+        if dt < interval_sec:
+            return
+
+        produced_delta = self._produced_count - self._produced_at_last_log
+        consumed_delta = self._consumed_count - self._consumed_at_last_log
+        in_rate = produced_delta / max(dt, 1e-6)
+        out_rate = consumed_delta / max(dt, 1e-6)
+
+        try:
+            qsize_now = self.result_queue.qsize()
+        except Exception:
+            qsize_now = -1
+
+        poll_p95 = self._p95(self._perf_samples['poll_ms'])
+        labels_p95 = self._p95(self._perf_samples['labels_ms'])
+        graph_p95 = self._p95(self._perf_samples['graph_ms'])
+        gcd_p95 = self._p95(self._perf_samples['gcd_hist_ms'])
+        e2e_p95 = self._p95(self._perf_samples['end_to_end_ms'])
+        tg_avg = self._avg(self._perf_samples['twingate_ms'])
+
+        print(
+            '[perf] '
+            f'queue={qsize_now} max={self._queue_max_depth} '
+            f'in={in_rate:.1f}/s out={out_rate:.1f}/s '
+            f'poll_p95={poll_p95:.2f}ms '
+            f'labels_p95={labels_p95:.2f}ms graph_p95={graph_p95:.2f}ms '
+            f'gcdhist_p95={gcd_p95:.2f}ms e2e_p95={e2e_p95:.2f}ms '
+            f'tg_avg={tg_avg:.2f}ms',
+            flush=True,
+        )
+
+        self._produced_at_last_log = self._produced_count
+        self._consumed_at_last_log = self._consumed_count
+        self._last_perf_log_ts = now
+
+    def _render_latest(self, now: float) -> None:
+        if self._latest_result is None:
+            return
+
+        if (now - self._last_render_ts) < self._render_interval_sec:
+            return
+
+        r = self._latest_result
+        self._last_render_ts = now
+
+        t0 = time.perf_counter()
         self._update_labels(r)
-        self._update_graph(r)
+        self._record_perf('labels_ms', (time.perf_counter() - t0) * 1000.0)
+
+        do_gcd_hist = (now - self._last_gcd_hist_ts) >= self._gcd_hist_interval_sec
+        t1 = time.perf_counter()
+        self._update_graph(r, update_gcd_hist=do_gcd_hist)
+        self._record_perf('graph_ms', (time.perf_counter() - t1) * 1000.0)
+        if do_gcd_hist:
+            self._last_gcd_hist_ts = now
+
+        if self._latest_enqueued_ts is not None:
+            self._record_perf('end_to_end_ms', (time.perf_counter() - self._latest_enqueued_ts) * 1000.0)
 
     def _poll_results(self) -> None:
-        processed = 0
+        t_poll0 = time.perf_counter()
+        drained = 0
         try:
-            while processed < 10:
-                r = self.result_queue.get_nowait()
+            while True:
+                enq_ts, r = self.result_queue.get_nowait()
                 self._handle_result(r)
-                processed += 1
+                self._latest_result = r
+                self._latest_enqueued_ts = enq_ts
+                self._last_result_seen = r
+                self._consumed_count += 1
+                self._record_perf('twingate_ms', r.processing_time_ms)
+                drained += 1
         except queue.Empty:
             pass
+
+        now = time.perf_counter()
+        if drained > 0:
+            self._render_latest(now)
+        self._record_perf('poll_ms', (time.perf_counter() - t_poll0) * 1000.0)
+        self._maybe_log_perf(now)
         self.root.after(50, self._poll_results)  # reschedule
 
     # ── Control ───────────────────────────────────────────────────────────────
@@ -734,7 +861,7 @@ class TempoEstimatorApp:
             self._midi_listener = _TwinGateMidiListener(
                 self.twin_gate,
                 port_index=port_index,
-                on_result=self.result_queue.put,
+                on_result=self._enqueue_result,
             )
             self._midi_listener.start()
             self.is_running = True
@@ -880,7 +1007,7 @@ class TempoEstimatorApp:
             with self.lock:
                 result = self.twin_gate.update(ts, note_number=note, channel=channel)
             if result is not None:
-                self.result_queue.put(result)
+                self._enqueue_result(result)
 
         self.is_running = False
         print("[mock] done.", flush=True)
