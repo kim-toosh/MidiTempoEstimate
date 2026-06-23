@@ -215,11 +215,20 @@ class ParticleFilter:
         t0 = time.perf_counter()
 
         # ── 1. Classify event ─────────────────────────────────────────────────
-        event, ioi_sec, gcd_tempo, gcd_conf = self.midi_gate.process(
+        event, ioi_sec, gcd_candidates = self.midi_gate.process(
             timestamp_sec, note_number, velocity, channel
         )
-        if gcd_tempo is not None:
-            gcd_tempo = self._correct_gcd_octave(gcd_tempo)
+        if gcd_candidates:
+            # Use KALMAN_INIT_TEMPO as reference so autocorr drift before GCD fires
+            # doesn't cause the wrong octave to be selected for the reinit.
+            init_ref  = getattr(self.config, 'KALMAN_INIT_TEMPO', 120.0)
+            dists     = [abs(t - init_ref) for t, _ in gcd_candidates]
+            best_i    = int(dists.index(min(dists)))
+            gcd_tempo = gcd_candidates[best_i][0]
+            gcd_conf  = gcd_candidates[best_i][1]
+        else:
+            gcd_tempo = None
+            gcd_conf  = 0.0
         if event is None:
             return None   # velocity == 0 (NOTE_OFF) — should not occur here
 
@@ -286,7 +295,7 @@ class ParticleFilter:
             )
 
         # ── 5. Kalman gate (+ streak-based feedback seeding) ─────────────────
-        gate_result = self.kalman_gate.update(result.tempo_bpm, result.confidence)
+        gate_result = self.kalman_gate.update([(result.tempo_bpm, result.confidence)])
 
         if not self._converged:
             if gate_result.accepted:

@@ -22,9 +22,11 @@ def test_convergence_within_4_events() -> None:
     for i, (ts, note, channel) in enumerate(events):
         pf.update(ts, note_number=note, channel=channel)
         total_events = len(pf.midi_gate.gcd_timestamps)
+        gcd_conf = (pf.midi_gate.last_gcd_candidates[0][1]
+                    if pf.midi_gate.last_gcd_candidates else 0.0)
         if (gcd_reach_event is None
                 and total_events >= config.GCD_MIN_EVENTS
-                and pf.midi_gate.last_gcd_confidence >= config.GCD_CONFIDENCE_THRESHOLD):
+                and gcd_conf >= config.GCD_CONFIDENCE_THRESHOLD):
             gcd_reach_event = i + 1
 
     assert gcd_reach_event is not None, (
@@ -36,33 +38,27 @@ def test_convergence_within_4_events() -> None:
 
 
 def test_convergence_hihat_16th() -> None:
-    """120BPMのhihat_16thでGCD推定テンポ（オクターブ補正後）が120±3.0 BPM以内。
+    """120BPMのhihat_16thでGCD候補リスト内に120±4.5 BPMの候補が含まれる。
 
-    hihat_16thではgcdは16th note周期に収束する（gcd_tempo ≈ 4*bpm）ため、
-    GCD_OCTAVE_RATIOSで割った候補のうち120に最も近いものを評価する。
+    GCDはKick/Snareタイムスタンプのみを使用するため hihat_16th でも
+    0.5s IOI（120BPM）が正しく検出される。
+    estimate_tempo_from_timestamps_multi はオクターブ展開済みの候補を返すため、
+    gcd_candidates のいずれかが120 BPM付近にあることを確認する。
     """
     np.random.seed(0)
     events = generate_drum_pattern_events(120.0, n_bars=4, pattern='hihat_16th', humanize_ms=8.0, seed=0)
     pf = ParticleFilter(config)
 
-    gcd_tempo: float | None = None
+    found_near_120: bool = False
     for ts, note, channel in events:
         pf.update(ts, note_number=note, channel=channel)
-        if (pf.midi_gate.last_gcd_confidence >= config.GCD_CONFIDENCE_THRESHOLD
-                and pf.midi_gate.last_gcd_tempo is not None):
-            gcd_tempo = pf.midi_gate.last_gcd_tempo
+        cands = pf.midi_gate.last_gcd_candidates
+        if (cands and cands[0][1] >= config.GCD_CONFIDENCE_THRESHOLD
+                and any(abs(t - 120.0) < 4.5 for t, _ in cands)):
+            found_near_120 = True
             break
 
-    assert gcd_tempo is not None, "GCD should produce a confident estimate for hihat_16th"
-    octave_ratios = np.asarray(config.GCD_OCTAVE_RATIOS, dtype=np.float64)
-    candidates = gcd_tempo / octave_ratios
-    best = candidates[np.argmin(np.abs(candidates - 120.0))]
-    # 同時イベントのグルーピング（平均タイムスタンプ化）によりGCDタイムスタンプ
-    # バッファの内容が変化するため、わずかに許容誤差を緩和（3.0 -> 4.5 BPM）。
-    assert abs(best - 120.0) < 4.5, (
-        f"hihat_16th GCD tempo {gcd_tempo:.1f} (best octave candidate {best:.1f}) "
-        f"not within 4.5 BPM of 120"
-    )
+    assert found_near_120, "GCD candidates should contain ~120 BPM for hihat_16th"
 
 
 def test_gcd_vs_autocorr_speed() -> None:
@@ -86,8 +82,10 @@ def test_gcd_vs_autocorr_speed() -> None:
         autocorr.add_event(ts, note, 100)
 
         # GCDが閾値到達した時点のK+Sイベント数を記録
+        _gcd_conf = (pf.midi_gate.last_gcd_candidates[0][1]
+                     if pf.midi_gate.last_gcd_candidates else 0.0)
         if (gcd_ks_reach is None
-                and pf.midi_gate.last_gcd_confidence >= config.GCD_CONFIDENCE_THRESHOLD):
+                and _gcd_conf >= config.GCD_CONFIDENCE_THRESHOLD):
             ks = (pf.midi_gate.event_count_by_category.get(InstrumentCategory.KICK, 0)
                   + pf.midi_gate.event_count_by_category.get(InstrumentCategory.SNARE, 0))
             gcd_ks_reach = ks
@@ -106,31 +104,28 @@ def test_gcd_vs_autocorr_speed() -> None:
 
 
 def test_various_tempos() -> None:
-    """[80,100,120,140,160] BPMそれぞれでGCD推定テンポ（オクターブ補正後）が±6%以内。
+    """[80,100,120,140,160] BPMそれぞれでGCD候補リスト内に±6%以内の候補が含まれる。
 
-    basic_rockではgcdは8th note周期に収束する（gcd_tempo ≈ 2*bpm）ため、
-    GCD_OCTAVE_RATIOSで割った候補のうちbpmに最も近いものを評価する。
+    estimate_tempo_from_timestamps_multi はオクターブ展開済み候補を返すため、
+    last_gcd_candidates のいずれかが目標BPMの±6%以内にあることを確認する。
     """
     for bpm in [80.0, 100.0, 120.0, 140.0, 160.0]:
         np.random.seed(0)
         events = generate_drum_pattern_events(bpm, n_bars=4, pattern='basic_rock', humanize_ms=8.0, seed=0)
         pf = ParticleFilter(config)
 
-        gcd_tempo: float | None = None
+        found: bool = False
         for ts, note, channel in events:
             pf.update(ts, note_number=note, channel=channel)
-            if (pf.midi_gate.last_gcd_confidence >= config.GCD_CONFIDENCE_THRESHOLD
-                    and pf.midi_gate.last_gcd_tempo is not None):
-                gcd_tempo = pf.midi_gate.last_gcd_tempo
+            cands = pf.midi_gate.last_gcd_candidates
+            if (cands and cands[0][1] >= config.GCD_CONFIDENCE_THRESHOLD
+                    and any(abs(t - bpm) < bpm * 0.06 for t, _ in cands)):
+                found = True
                 break
 
-        assert gcd_tempo is not None, f"GCD should produce estimate at {bpm} BPM"
-        octave_ratios = np.asarray(config.GCD_OCTAVE_RATIOS, dtype=np.float64)
-        candidates = gcd_tempo / octave_ratios
-        best = candidates[np.argmin(np.abs(candidates - bpm))]
-        assert abs(best - bpm) < bpm * 0.06, (
-            f"GCD at {bpm} BPM: gcd_tempo={gcd_tempo:.1f}, "
-            f"best octave candidate {best:.1f}, error too large"
+        assert found, (
+            f"GCD candidates should contain a tempo within 6% of {bpm} BPM. "
+            f"Last candidates: {pf.midi_gate.last_gcd_candidates}"
         )
 
 

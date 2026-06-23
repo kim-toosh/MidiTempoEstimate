@@ -16,7 +16,7 @@ from midi_tempo_hmm.core.kalman_gate import KalmanGate
 def _warm_up(gate: KalmanGate, tempo: float, n: int = 20, confidence: float = 0.8) -> None:
     """Feed *n* clean observations at *tempo* BPM to establish the Kalman mean."""
     for _ in range(n):
-        gate.update(tempo, confidence)
+        gate.update([(tempo, confidence)])
 
 
 # ── tests ──────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ def test_accept_steady_tempo() -> None:
 
     accepts = sum(
         1 for _ in range(n)
-        if gate.update(120.0 + rng.gauss(0.0, 1.0), 0.8).accepted
+        if gate.update([(120.0 + rng.gauss(0.0, 1.0), 0.8)]).accepted
     )
     assert accepts / n >= 0.90, f"Accept rate {accepts/n:.2%} < 90%"
 
@@ -38,7 +38,7 @@ def test_reject_octave_jump() -> None:
     """240 BPM candidate while settled at 120 BPM → 'octave' reject."""
     gate = KalmanGate(config)
     _warm_up(gate, 120.0)
-    result = gate.update(240.0, 0.8)
+    result = gate.update([(240.0, 0.8)])
     assert result.accepted is False
     assert result.reject_reason == "octave"
 
@@ -47,7 +47,7 @@ def test_reject_mahal_outlier() -> None:
     """200 BPM candidate while settled at 120 BPM → 'mahal' reject (not octave)."""
     gate = KalmanGate(config)
     _warm_up(gate, 120.0)
-    result = gate.update(200.0, 0.8)
+    result = gate.update([(200.0, 0.8)])
     assert result.accepted is False
     assert result.reject_reason == "mahal"
 
@@ -55,7 +55,7 @@ def test_reject_mahal_outlier() -> None:
 def test_reject_low_confidence() -> None:
     """Low confidence (0.3) → 'confidence' reject on first call."""
     gate   = KalmanGate(config)
-    result = gate.update(120.0, confidence=0.3)
+    result = gate.update([(120.0, 0.3)])
     assert result.accepted is False
     assert result.reject_reason == "confidence"
 
@@ -73,7 +73,7 @@ def test_tempo_rms_error_improvement() -> None:
             candidate = 120.0 + rng.choice([-60.0, 60.0])
         else:
             candidate = 120.0 + rng.gauss(0.0, 3.0)
-        result = gate.update(candidate, 0.8)
+        result = gate.update([(candidate, 0.8)])
         raw_list.append(candidate)
         gated_list.append(result.gated_tempo)
 
@@ -93,7 +93,7 @@ def test_variance_convergence() -> None:
     gate = KalmanGate(config)
     result = None
     for _ in range(40):
-        result = gate.update(120.0, 0.8)
+        result = gate.update([(120.0, 0.8)])
     assert result is not None
     assert result.current_var < config.KALMAN_R, (
         f"Variance {result.current_var:.4f} did not converge below KALMAN_R={config.KALMAN_R}"

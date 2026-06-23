@@ -110,10 +110,10 @@ GCD_REINIT_SIGMA:         float = 3.0    # 粒子再初期化時のガウス分�
 # テンポ推定に最も近いものをbeatテンポとして採用する（particle_filter.py）。
 # 最大倍率(=16)は、approx_gcdの探索下限(g_min)と最終レンジチェックの上限
 # (TEMPO_MAX*max(GCD_OCTAVE_RATIOS))の算出にも使用する（approx_gcd.py）。
-GCD_OCTAVE_RATIOS: list[int] = [1, 2, 4, 8, 16]
+GCD_OCTAVE_RATIOS: list[int] = [1, 2, 3, 4, 6, 8, 16]
 
 # ── 同時イベントのグルーピング ───────────────────────────────────────────────
-SPAN_SAME_TIME_SEC: float = 0.10  # この時間内の異なるノートのイベントを同一タイミングとみなす [秒]
+SPAN_SAME_TIME_SEC: float = 0.07  # この時間内の異なるノートのイベントを同一タイミングとみなす [秒]
 
 # ── イベントタイムアウト ─────────────────────────────────────────────────────
 # 前回イベントからこの時間を超えた場合、GCDタイムスタンプバッファをクリアする
@@ -127,3 +127,10 @@ PCO_ETA_PHASE_STRONG : float = 0.25   # Kick/Snare（強拍系）
 PCO_ETA_PHASE_WEAK   : float = 0.05   # HiHat/Others（弱拍系）
 PCO_SYNC_THRESHOLD   : float = 0.10   # 平均位相誤差がこの値以内なら同期確立
 PCO_PREDICTION_ENABLE: bool  = True   # 次Beat予測を有効にするか
+
+# ── 近似GCD：ratio候補（3連符系を含む統合リスト）─────────────────────────────
+GCD_RATIOS: list[float] = [1/6, 0.25, 1/3, 0.5, 2/3, 1.0, 1.5, 2.0]
+
+# ── GCD 複数候補出力 ─────────────────────────────────────────────────────────
+GCD_N_CANDIDATES: int = 4          # 上位何件を候補として保持・出力するか
+GCD_CANDIDATE_MIN_GAP: float = 0.05  # 候補間の最小差（秒）

@@ -48,9 +48,9 @@ def test_ioi_same_category_only() -> None:
     """Kick → HiHat → Kick: only the second Kick produces a Kick IOI."""
     gate = _gate()
 
-    _, ioi_kick1, _, _ = gate.process(0.0,  36, 100, _DRUM_CH)  # KICK
-    _, ioi_hihat, _, _ = gate.process(0.25, 42, 100, _DRUM_CH)  # HIHAT
-    _, ioi_kick2, _, _ = gate.process(1.0,  36, 100, _DRUM_CH)  # KICK
+    _, ioi_kick1, _ = gate.process(0.0,  36, 100, _DRUM_CH)  # KICK
+    _, ioi_hihat, _ = gate.process(0.25, 42, 100, _DRUM_CH)  # HIHAT
+    _, ioi_kick2, _ = gate.process(1.0,  36, 100, _DRUM_CH)  # KICK
 
     assert ioi_kick1 is None, "First Kick should have no IOI"
     assert ioi_hihat is None, "First HiHat should have no IOI (separate from Kick)"
@@ -60,11 +60,10 @@ def test_ioi_same_category_only() -> None:
 
 def test_noteoff_returns_none() -> None:
     gate = _gate()
-    ev, ioi, gcd_t, gcd_c = gate.process(0.0, 36, 0, _DRUM_CH)  # velocity=0 → NOTE_OFF
+    ev, ioi, cands = gate.process(0.0, 36, 0, _DRUM_CH)  # velocity=0 → NOTE_OFF
     assert ev is None
     assert ioi is None
-    assert gcd_t is None
-    assert gcd_c == 0.0
+    assert cands == []
 
 
 def test_non_drum_channel_returns_others() -> None:
@@ -100,7 +99,7 @@ def test_reset_clears_state() -> None:
     stats = gate.get_stats()
     assert all(v == 0 for v in stats.values())
     # After reset, next Kick has no IOI
-    _, ioi, _, _ = gate.process(0.0, 36, 100, _DRUM_CH)
+    _, ioi, _ = gate.process(0.0, 36, 100, _DRUM_CH)
     assert ioi is None
 
 
@@ -111,20 +110,23 @@ def test_gcd_tempo_after_enough_events() -> None:
     gate.process(0.0, 36, 100, _DRUM_CH)   # K1 - no GCD yet
     gate.process(0.5, 38, 100, _DRUM_CH)   # S1 - 2 events
     gate.process(1.0, 36, 100, _DRUM_CH)   # K2 - 3 events
-    _, _, gcd_t, gcd_c = gate.process(1.5, 38, 100, _DRUM_CH)  # S2 - 4 events
-    assert gcd_t is not None, "GCD tempo should be estimated after 4 events"
-    assert abs(gcd_t - 120.0) < 5.0, f"GCD tempo {gcd_t:.1f} not near 120 BPM"
-    assert gcd_c >= 0.5, f"GCD confidence {gcd_c:.2f} too low"
+    _, _, cands = gate.process(1.5, 38, 100, _DRUM_CH)  # S2 - 4 events
+    assert len(cands) > 0, "GCD should return candidates after 4 events"
+    assert any(abs(t - 120.0) < 5.0 for t, _ in cands), (
+        f"Expected ~120 BPM among candidates, got {cands}"
+    )
+    assert any(c >= 0.5 for _, c in cands), (
+        f"Expected at least one high-confidence candidate, got {cands}"
+    )
 
 
 def test_gcd_returns_none_before_min_events() -> None:
-    """最低イベント数未満ではGCDがNoneを返す。"""
+    """最低イベント数未満ではGCDが空リストを返す。"""
     gate = _gate()
     gate.process(0.0, 36, 100, _DRUM_CH)
     gate.process(0.5, 38, 100, _DRUM_CH)
-    _, _, gcd_t, gcd_c = gate.process(1.0, 36, 100, _DRUM_CH)  # 3 events < GCD_MIN_EVENTS=4
-    assert gcd_t is None
-    assert gcd_c == 0.0
+    _, _, cands = gate.process(1.0, 36, 100, _DRUM_CH)  # 3 events < GCD_MIN_EVENTS=4
+    assert cands == []
 
 
 def test_reset_clears_gcd_state() -> None:
@@ -133,6 +135,5 @@ def test_reset_clears_gcd_state() -> None:
     for ts, note in [(0.0, 36), (0.5, 38), (1.0, 36), (1.5, 38)]:
         gate.process(ts, note, 100, _DRUM_CH)
     gate.reset()
-    assert gate.last_gcd_tempo is None
-    assert gate.last_gcd_confidence == 0.0
+    assert gate.last_gcd_candidates == []
     assert len(gate.gcd_timestamps) == 0

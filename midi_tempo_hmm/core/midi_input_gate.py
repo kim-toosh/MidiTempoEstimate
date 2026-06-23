@@ -9,7 +9,10 @@ from typing import Optional
 
 import numpy as np
 
-from midi_tempo_hmm.core.approx_gcd import estimate_tempo_from_timestamps
+from midi_tempo_hmm.core.approx_gcd import (
+    estimate_tempo_from_timestamps,
+    estimate_tempo_from_timestamps_multi,
+)
 from midi_tempo_hmm.core.instrument_category import CategorizedEvent, InstrumentCategory
 
 logger = logging.getLogger(__name__)
@@ -59,8 +62,7 @@ class MidiInputGate:
         _buf_size = getattr(config, 'GCD_BUFFER_SIZE', 8)
         self.gcd_timestamps: deque[float] = deque(maxlen=_buf_size)
 
-        self.last_gcd_tempo:      Optional[float] = None
-        self.last_gcd_confidence: float = 0.0
+        self.last_gcd_candidates: list[tuple[float, float]] = []
         self.last_gcd_iois:       list[float] = []
 
         # 同時イベントグルーピング用（SPAN_SAME_TIME_SEC内のイベントを平均化）
@@ -83,15 +85,16 @@ class MidiInputGate:
         note_number:   int,
         velocity:      int,
         channel:       int,
-    ) -> tuple[Optional[CategorizedEvent], Optional[float], Optional[float], float]:
+    ) -> tuple[Optional[CategorizedEvent], Optional[float], list[tuple[float, float]]]:
         """Classify a MIDI event, compute same-category IOI, and estimate GCD tempo.
 
         Returns:
-            (event, ioi_sec, gcd_tempo, gcd_confidence)
+            (event, ioi_sec, gcd_candidates)
+            gcd_candidates is a list of (tempo_bpm, confidence) tuples, best first.
             event is ``None`` when *velocity* == 0 (NOTE_OFF).
         """
         if velocity == 0:
-            return (None, None, None, 0.0)
+            return (None, None, [])
 
         # 前回イベントからevent_timeoutを超えていたら、GCDバッファをクリアする
         # （長い無音区間を挟むと、空白期間がIOIとして混入しGCD推定が破綻するため）。
@@ -151,12 +154,11 @@ class MidiInputGate:
             f"{ioi_sec:.4f}" if ioi_sec is not None else None,
         )
 
-        # Kick+Snare合算で近似GCDを計算
-        gcd_tempo, gcd_confidence = self._calc_gcd_tempo()
-        self.last_gcd_tempo       = gcd_tempo
-        self.last_gcd_confidence  = gcd_confidence
+        # Kick+Snare合算で近似GCD候補を計算
+        gcd_candidates           = self._calc_gcd_tempo()
+        self.last_gcd_candidates = gcd_candidates
 
-        return (event, ioi_sec, gcd_tempo, gcd_confidence)
+        return (event, ioi_sec, gcd_candidates)
 
     def get_ioi(self, event: CategorizedEvent) -> Optional[float]:
         """Return the same-category IOI in seconds, or ``None`` on the first event.
@@ -178,8 +180,7 @@ class MidiInputGate:
             self.event_count_by_category[c] = 0
             self._last_time[c] = None
         self.gcd_timestamps.clear()
-        self.last_gcd_tempo      = None
-        self.last_gcd_confidence = 0.0
+        self.last_gcd_candidates = []
         self.last_gcd_iois       = []
         self._last_event_time    = None
         self._group_start = None
@@ -217,41 +218,24 @@ class MidiInputGate:
             return self._crash_weight
         return self._cat_weight[category]
 
-    def _calc_gcd_tempo(self) -> tuple[Optional[float], float]:
-        """Kick・Snareのタイムスタンプを合算して近似GCDを計算する。"""
-        # Kick/Snareを単一バッファに時系列順で蓄積しているため、
-        # ソートし直す必要はないが、念のため明示的にソートしておく。
-        # 単一バッファにまとめることで、一方のカテゴリの入力が
-        # 一定時間途絶えても、もう一方の古いタイムスタンプが
-        # バッファに居座り続けてGCD計算に影響することを防ぐ。
+    def _calc_gcd_tempo(self) -> list[tuple[float, float]]:
+        """Kick・Snareのタイムスタンプを合算して近似GCD候補を複数計算する。"""
         combined = sorted(self.gcd_timestamps)
 
-        # 推定に必要な最小イベント数（IOI換算でmin_events-1個）に達していない
-        # 場合は、GCD推定が不安定になるため計算をスキップしてNoneを返す。
         min_events = getattr(self._cfg, 'GCD_MIN_EVENTS', 4)
         if len(combined) < min_events:
             self.last_gcd_iois = []
             logger.debug(
-                "gcd_timestamps=%s iois=%s (n=%d < min_events=%d), skipping",
-                combined, list(np.diff(np.asarray(combined, dtype=float))),
-                len(combined), min_events,
+                "gcd_timestamps=%s (n=%d < min_events=%d), skipping",
+                combined, len(combined), min_events,
             )
-            return (None, 0.0)
+            return []
 
-        # GUI表示用に、GCD推定の入力となるIOI列をそのまま保持しておく
-        # （estimate_tempo_from_timestamps内部でも同じ np.diff を計算するが、
-        #  戻り値が(tempo, confidence)のみのため、表示用に別途計算する）
         self.last_gcd_iois = list(np.diff(np.asarray(combined, dtype=float)))
 
-        # approx_gcd.estimate_tempo_from_timestamps に委譲:
-        #   1. combinedの隣接差分(IOI)を取り、approx_gcd()で粗→精密の
-        #      2段階探索により近似GCD周期を求める
-        #   2. refine_gcd()で加重中央値による反復精密化
-        #   3. calc_gcd_confidence()でGCDに対する各IOIの残差から信頼度を算出
-        #   4. tempo = 60/gcd に変換。TEMPO_MIN/MAX範囲外なら(None, 0.0)を返す
-        gcd_tempo, gcd_confidence = estimate_tempo_from_timestamps(combined, self._cfg)
+        candidates = estimate_tempo_from_timestamps_multi(combined, self._cfg)
         logger.debug(
-            "gcd_timestamps=%s iois=%s -> gcd_tempo=%s confidence=%.3f",
-            combined, self.last_gcd_iois, gcd_tempo, gcd_confidence,
+            "gcd_timestamps=%s iois=%s -> candidates=%s",
+            combined, self.last_gcd_iois, candidates,
         )
-        return (gcd_tempo, gcd_confidence)
+        return candidates

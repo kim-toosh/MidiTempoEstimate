@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from midi_tempo_hmm.core.instrument_category import InstrumentCategory
@@ -55,3 +55,6 @@ class TwinGateResult:
     next_beat_time  : Optional[float] = None   # 次拍頭の予測絶対時刻 [秒]
     beat_count      : int             = 0      # 拍頭通過累計回数
     phase_sync_conf : float           = 0.0    # 位相同期信頼度 [0.0, 1.0]
+
+    # --- GCD複数候補 ---
+    gcd_candidates  : list = field(default_factory=list)  # [(tempo_bpm, confidence), ...]

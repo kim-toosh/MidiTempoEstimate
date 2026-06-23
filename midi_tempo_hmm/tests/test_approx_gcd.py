@@ -8,8 +8,10 @@ import pytest
 import midi_tempo_hmm.config as config
 from midi_tempo_hmm.core.approx_gcd import (
     approx_gcd,
+    approx_gcd_top_n,
     calc_gcd_confidence,
     estimate_tempo_from_timestamps,
+    estimate_tempo_from_timestamps_multi,
     refine_gcd,
 )
 
@@ -95,6 +97,82 @@ def test_computation_time() -> None:
         estimate_tempo_from_timestamps(timestamps, config)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0 / N_TRIALS
     assert elapsed_ms < 1.0, f"Processing time {elapsed_ms:.3f} ms exceeds 1.0 ms"
+
+
+def test_normalization_by_base_not_expected() -> None:
+    """残差はexpected(g*r)でなくbase(g)で正規化されている（スコアがgに対して公平）。
+
+    g=0.5sのとき r=2.0でv=1.0: residual = |1.0 - 0.5*2.0|/0.5 = 0.0
+    g=1.0sのとき r=1.0でv=1.0: residual = |1.0 - 1.0*1.0|/1.0 = 0.0
+    どちらも同じ値なら、より大きなg(=1.0)が選ばれる（Stage1の tie-break動作）。
+    """
+    ratios = np.array([0.5, 1.0, 2.0])
+    values = np.array([1.0, 2.0])
+    # g=1.0: ratio=1.0でresidual=(|1-1|+|2-2|)/1.0/2=0, g=0.5: ratio=2.0でも0
+    # approx_gcd_top_n が両方ゼロのとき最大gを選ぶことを確認
+    results = approx_gcd_top_n(values, 0.4, 2.1, 0.01, ratios, 1, 0.05)
+    assert len(results) >= 1
+    best_period, best_score = results[0]
+    assert best_score < 0.05, f"Expected near-zero score, got {best_score:.4f}"
+
+
+def test_top_n_returns_distinct_candidates() -> None:
+    """返された候補がmin_gap以上の間隔で離れていることを確認。"""
+    ratios = np.array([0.5, 1.0, 2.0])
+    values = np.array([0.5, 0.5, 1.0, 1.0, 0.5])
+    min_gap = 0.05
+    results = approx_gcd_top_n(values, 0.1, 2.5, 0.002, ratios, 3, min_gap)
+    periods = [r[0] for r in results]
+    for i in range(len(periods)):
+        for j in range(i + 1, len(periods)):
+            assert abs(periods[i] - periods[j]) >= min_gap - 1e-9, (
+                f"Candidates too close: {periods[i]:.4f} vs {periods[j]:.4f}"
+            )
+
+
+def test_top_n_count() -> None:
+    """n_candidates=2を指定したとき最大2件しか返らない。"""
+    ratios = np.array([0.5, 1.0, 2.0])
+    values = np.array([0.5, 0.5, 0.5, 1.0, 1.5])
+    results = approx_gcd_top_n(values, 0.1, 2.5, 0.002, ratios, 2, 0.05)
+    assert len(results) <= 2
+
+
+def test_ternary_pattern_correctly_identified() -> None:
+    """100 BPMと3連符が混在するIOIパターンを正しく100 BPMと識別する。
+
+    values_ms=[301.8, 102.4, 302.4, 194.3, 401.5] は：
+    - 302ms ≈ 100 BPM の1拍 (600ms周期 × 0.5)
+    - 102ms ≈ 100 BPM の3連符 (600ms周期 × 0.167)
+    - 194ms ≈ 100 BPM の3連符×2 (600ms周期 × 0.333)
+    - 402ms ≈ 100 BPM の2/3拍 (600ms周期 × 0.667)
+    旧整数n方式では200ms(300 BPM)を選んでしまう。
+    """
+    values_ms = [301.8, 102.4, 302.4, 194.3, 401.5]
+    ts = list(np.cumsum([0.0] + [v / 1000.0 for v in values_ms]))
+    results = estimate_tempo_from_timestamps_multi(ts, config)
+    assert len(results) > 0, "Should return at least one candidate"
+    best_tempo = results[0][0]
+    assert abs(best_tempo - 100.0) < 5.0, (
+        f"Expected ~100 BPM as best candidate, got {best_tempo:.2f} BPM. "
+        f"All candidates: {results}"
+    )
+
+
+def test_mixed_binary_ternary_pattern() -> None:
+    """8th notesと3連符の混合パターンで120 BPMを正しく識別する。"""
+    beat = 60.0 / 120.0  # 0.5s at 120 BPM
+    # 4分音符×2 + 3連符×3 + 4分音符×2
+    iois_sec = [beat, beat, beat / 3, beat / 3, beat / 3, beat, beat]
+    ts = list(np.cumsum([0.0] + iois_sec))
+    results = estimate_tempo_from_timestamps_multi(ts, config)
+    assert len(results) > 0, "Should return candidates"
+    # GCDはg=0.5s(120 BPM)またはg=1.0s(60 BPM)に収束しうる（どちらも正当な解釈）。
+    # GCD_OCTAVE_RATIOSで補正すれば60/120/240 BPMはすべて同一テンポ候補。
+    valid = {60.0, 120.0, 240.0}
+    assert any(any(abs(t - v) < 5.0 for v in valid) for t, _ in results), (
+        f"Expected 60/120/240 BPM in candidates, got {results}"
+    )
 
 
 def test_kick_snare_combined() -> None:

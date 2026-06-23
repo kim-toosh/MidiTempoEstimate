@@ -61,7 +61,7 @@ class TwinGate:
         """
         t0 = time.perf_counter()
 
-        event, raw_ioi, gcd_tempo_raw, gcd_confidence = self.midi_gate.process(
+        event, raw_ioi, gcd_candidates = self.midi_gate.process(
             timestamp_sec, note_number, velocity, channel
         )
 
@@ -106,59 +106,50 @@ class TwinGate:
         hihat_count  = counts.get(InstrumentCategory.HIHAT,  0)
         others_count = counts.get(InstrumentCategory.OTHERS, 0)
 
-        if gcd_tempo_raw is not None:
-            # オクターブ補正: GCDはサブディビジョン周期を返すことがあるため、
-            # Kalman平均に最も近いビート倍率候補を選択する。
-            gcd_tempo = self._correct_gcd_octave(gcd_tempo_raw)
-        else:
-            gcd_tempo = None
+        # KalmanGateに複数候補を渡す（select_best_candidate内部でKalman meanに最近傍を選択）
+        gr              = self.kalman_gate.update(gcd_candidates)
+        gate_accepted   = gr.accepted
+        reject_reason   = gr.reject_reason
+        predicted_tempo = gr.predicted_tempo
+        innovation      = gr.innovation
+        mahal_distance  = gr.mahal_distance
+        mahal_threshold = gr.mahal_threshold
+        kalman_variance = gr.current_var
+        kalman_gain     = gr.kalman_gain
+        tempo_bpm       = gr.gated_tempo
 
+        # 選択された候補のテンポ・信頼度（no_gcdの場合はNone）
+        if gcd_candidates and gr.selected_index >= 0:
+            gcd_tempo      = gcd_candidates[gr.selected_index][0]
+            gcd_confidence = gcd_candidates[gr.selected_index][1]
+        else:
+            gcd_tempo      = None
+            gcd_confidence = 0.0
         gcd_period = (60.0 / gcd_tempo) if gcd_tempo is not None else None
 
-        if gcd_tempo is None:
-            gate_accepted   = False
-            reject_reason   = "no_gcd"
-            predicted_tempo = self.kalman_gate.mean
-            innovation      = None
-            mahal_distance  = None
-            mahal_threshold = self.config.KALMAN_GATE_SIGMA ** 2
-            kalman_variance = self.kalman_gate._var
-            kalman_gain     = 0.0
-            tempo_bpm       = self.kalman_gate.mean
-        else:
-            gr = self.kalman_gate.update(candidate=gcd_tempo, confidence=gcd_confidence)
-            gate_accepted   = gr.accepted
-            reject_reason   = gr.reject_reason
-            predicted_tempo = gr.predicted_tempo
-            innovation      = gr.innovation
-            mahal_distance  = gr.mahal_distance
-            mahal_threshold = gr.mahal_threshold
-            kalman_variance = gr.current_var
-            kalman_gain     = gr.kalman_gain
-            tempo_bpm       = gr.gated_tempo
-
-            if not gr.accepted:
-                cat_buf = list(self._gcd_cat_buf)
-                parts: list[str] = []
-                for i, (ts, cat, has_mixed) in enumerate(cat_buf):
-                    if has_mixed:
-                        flag = 'K+S'
-                    elif cat == InstrumentCategory.KICK:
-                        flag = 'K'
-                    else:
-                        flag = 'S'
-                    ts_ms = ts * 1000.0
-                    if i == 0:
-                        parts.append(f'{flag}:{ts_ms:.1f}ms')
-                    else:
-                        diff_ms = (ts - cat_buf[i - 1][0]) * 1000.0
-                        parts.append(f'{flag}:{ts_ms:.1f}ms(+{diff_ms:.1f})')
-                buf_str = '  '.join(parts) if parts else '(empty)'
-                logger.warning(
-                    "REJECT(%s) gcd=%.2f BPM  kalman=%.2f BPM  conf=%.2f  %s",
-                    gr.reject_reason, gcd_tempo, gr.predicted_tempo,
-                    gcd_confidence, buf_str,
-                )
+        if not gr.accepted and reject_reason != "no_gcd":
+            cat_buf = list(self._gcd_cat_buf)
+            parts: list[str] = []
+            for i, (ts, cat, has_mixed) in enumerate(cat_buf):
+                if has_mixed:
+                    flag = 'K+S'
+                elif cat == InstrumentCategory.KICK:
+                    flag = 'K'
+                else:
+                    flag = 'S'
+                ts_ms = ts * 1000.0
+                if i == 0:
+                    parts.append(f'{flag}:{ts_ms:.1f}ms')
+                else:
+                    diff_ms = (ts - cat_buf[i - 1][0]) * 1000.0
+                    parts.append(f'{flag}:{ts_ms:.1f}ms(+{diff_ms:.1f})')
+            buf_str = '  '.join(parts) if parts else '(empty)'
+            logger.warning(
+                "REJECT(%s) gcd=%.2f BPM  kalman=%.2f BPM  conf=%.2f  %s",
+                gr.reject_reason,
+                gcd_tempo if gcd_tempo is not None else 0.0,
+                gr.predicted_tempo, gcd_confidence, buf_str,
+            )
 
         # PCO更新（テンポが確定している場合）
         pco = None
@@ -203,6 +194,7 @@ class TwinGate:
             next_beat_time     = pco.next_beat_time  if pco else None,
             beat_count         = pco.beat_count      if pco else 0,
             phase_sync_conf    = pco.sync_confidence if pco else 0.0,
+            gcd_candidates     = list(gcd_candidates),
         )
 
     def reset(self) -> None:

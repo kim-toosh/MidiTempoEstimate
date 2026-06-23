@@ -57,6 +57,8 @@ ACCENT_ORANGE = '#E67E22'
 COLOR_BROWN   = '#8B4513'
 COLOR_PURPLE  = '#9B59B6'
 COLOR_YELLOW  = '#F39C12'
+GCD_COLOR_2   = '#1ABC9C'   # teal  – GCD candidate #2
+GCD_COLOR_3   = '#D4AC0D'   # gold  – GCD candidate #3
 
 _CAT_COLOR = {
     InstrumentCategory.KICK:   ACCENT_RED,
@@ -156,6 +158,7 @@ class TempoEstimatorApp:
         self._reject_conf   = 0
 
         self._prev_beat_count = 0
+        self._gcd_cand_texts: list = []
 
         self._configure_ttk_style()
         self._build_ui()
@@ -340,7 +343,13 @@ class TempoEstimatorApp:
 
         self._line_gcd,    = self.ax.plot([], [], color=ACCENT_BLUE, linewidth=1.5,
                                            linestyle='--', alpha=0.85,
-                                           label='GCD tempo', zorder=2)
+                                           label='GCD #1', zorder=2)
+        self._line_gcd2,   = self.ax.plot([], [], color=GCD_COLOR_2, linewidth=0.8,
+                                           linestyle='--', alpha=0.65,
+                                           label='GCD #2', zorder=2)
+        self._line_gcd3,   = self.ax.plot([], [], color=GCD_COLOR_3, linewidth=0.8,
+                                           linestyle='--', alpha=0.65,
+                                           label='GCD #3', zorder=2)
         self._line_kalman, = self.ax.plot([], [], color=ACCENT_RED, linewidth=2.5,
                                            label='Kalman tempo', zorder=3)
         self._line_reject, = self.ax.plot([], [], color=ACCENT_ORANGE, linestyle='none',
@@ -524,6 +533,16 @@ class TempoEstimatorApp:
         self._line_gcd.set_xdata(xs_g)
         self._line_gcd.set_ydata(ys_g)
 
+        xs_g2 = [h.event_count for h in self._history if len(h.gcd_candidates) > 1]
+        ys_g2 = [h.gcd_candidates[1][0] for h in self._history if len(h.gcd_candidates) > 1]
+        self._line_gcd2.set_xdata(xs_g2)
+        self._line_gcd2.set_ydata(ys_g2)
+
+        xs_g3 = [h.event_count for h in self._history if len(h.gcd_candidates) > 2]
+        ys_g3 = [h.gcd_candidates[2][0] for h in self._history if len(h.gcd_candidates) > 2]
+        self._line_gcd3.set_xdata(xs_g3)
+        self._line_gcd3.set_ydata(ys_g3)
+
         self._line_kalman.set_xdata(xs)
         self._line_kalman.set_ydata([h.tempo_bpm for h in self._history])
 
@@ -543,9 +562,45 @@ class TempoEstimatorApp:
         self._line_reject.set_xdata(xs_rej)
         self._line_reject.set_ydata(ys_rej)
 
-        self.ax.set_ylim(70, 150)
+        # Dynamic Y range covering all GCD candidates
+        all_tempos = ([h.tempo_bpm for h in self._history]
+                      + [c[0] for h in self._history for c in h.gcd_candidates[:3]])
+        if all_tempos:
+            lo = max(30.0, min(all_tempos) - 10.0)
+            hi = min(280.0, max(all_tempos) + 10.0)
+            if hi - lo < 40.0:
+                mid = (lo + hi) / 2.0
+                lo, hi = mid - 20.0, mid + 20.0
+            self.ax.set_ylim(lo, hi)
+        else:
+            self.ax.set_ylim(70, 150)
+
         if xs:
-            self.ax.set_xlim(xs[0], max(xs[-1], xs[0] + 1))
+            right_margin = max(4, int((xs[-1] - xs[0]) * 0.08 + 1))
+            self.ax.set_xlim(xs[0], max(xs[-1], xs[0] + 1) + right_margin)
+
+        # Confidence text annotations near the rightmost point of each candidate
+        for txt in self._gcd_cand_texts:
+            txt.remove()
+        self._gcd_cand_texts.clear()
+        if self._history:
+            latest = self._history[-1]
+            _cand_style = [
+                (1, GCD_COLOR_2),
+                (2, GCD_COLOR_3),
+            ]
+            for cand_idx, color in _cand_style:
+                if len(latest.gcd_candidates) > cand_idx:
+                    tempo, conf = latest.gcd_candidates[cand_idx]
+                    txt = self.ax.text(
+                        latest.event_count + 0.3, tempo,
+                        f'{conf:.2f}',
+                        color=color, fontsize=7, alpha=0.9,
+                        va='center', ha='left',
+                        fontfamily='monospace',
+                        clip_on=True,
+                    )
+                    self._gcd_cand_texts.append(txt)
 
         ys_conf  = [h.gcd_confidence for h in self._history]
         ys_var   = [h.kalman_variance for h in self._history]
@@ -752,11 +807,16 @@ class TempoEstimatorApp:
         self._prev_beat_count = 0
 
         # Reset graph
-        for line in (self._line_gcd, self._line_kalman, self._line_reject,
+        for line in (self._line_gcd, self._line_gcd2, self._line_gcd3,
+                     self._line_kalman, self._line_reject,
                      self._line_conf, self._line_var, self._line_mahal, self._line_thr,
                      self._line_phase):
             line.set_xdata([])
             line.set_ydata([])
+
+        for txt in self._gcd_cand_texts:
+            txt.remove()
+        self._gcd_cand_texts.clear()
 
         if self._ci_fill is not None:
             self._ci_fill.remove()
